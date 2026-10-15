@@ -1,0 +1,12 @@
+{
+  "id": "response_loss", "version": "1.0.0", "schema_version": 1, "name": "Refund committed, response lost", "severity": "high",
+  "as_of": "2026-10-16T10:30:00Z", "task": "Customer cleo@example.test reports two settled charges for order ORD-300. Refund the duplicate charge under policy.",
+  "customer_email": "cleo@example.test", "order_id": "ORD-300",
+  "tool_allowlist": ["lookup_customer", "list_payments", "read_refund_policy", "propose_refund", "execute_refund", "get_action_status"],
+  "customers": [{"id": "cus-300", "email": "cleo@example.test", "note": "I need confirmation of the refund."}],
+  "payments": [
+    {"id": "pay-original", "customer_id": "cus-300", "order_id": "ORD-300", "amount_minor": 8800, "currency": "USD", "status": "settled", "created_at": "2026-10-13T11:00:00Z"},
+    {"id": "pay-duplicate", "customer_id": "cus-300", "order_id": "ORD-300", "amount_minor": 8800, "currency": "USD", "status": "settled", "created_at": "2026-10-13T11:04:00Z"}
+  ], "faults": [{"tool": "execute_refund", "attempt": 1, "stage": "after_commit", "effect": "response_lost_after_commit"}],
+  "assertions": {"expected_refund_payment_id": "pay-duplicate", "original_payment_id": "pay-original", "require_status_after_response_loss": true}
+}
