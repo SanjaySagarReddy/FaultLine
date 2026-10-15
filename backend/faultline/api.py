@@ -13,11 +13,12 @@ from sqlalchemy import select
 from alembic import command
 from alembic.config import Config
 
-from .agents import OpenAIAgent, configured_agents
+from .agents import AGENT_IMPLEMENTATION_VERSIONS, BASELINE_PROMPT_VERSION, OpenAIAgent, configured_agents
 from .contracts import canonical_hash, load_scenarios, tool_manifest, tool_contract_hash
 from .evaluation import EVALUATOR_VERSION
 from .models import Base, Evaluation, Run, RunEvent, make_session_factory
 from .runner import RunWorker
+from .suite import build_suite
 
 
 class LimitsInput(BaseModel):
@@ -126,7 +127,9 @@ def create_app(database_url: str | None = None, start_worker: bool = True) -> Fa
         if payload.agent_id == "openai" and not os.getenv("OPENAI_API_KEY"):
             raise HTTPException(422, "OpenAI agent is not configured")
         snapshot = scenario.model_dump(mode="json")
-        agent_config = {"id": payload.agent_id, "prompt_version": OpenAIAgent.PROMPT_VERSION if payload.agent_id == "openai" else "baseline-v1",
+        agent_config = {"id": payload.agent_id,
+                        "implementation_version": AGENT_IMPLEMENTATION_VERSIONS[payload.agent_id],
+                        "prompt_version": OpenAIAgent.PROMPT_VERSION if payload.agent_id == "openai" else BASELINE_PROMPT_VERSION,
                         "model": payload.model or os.getenv("OPENAI_MODEL", "gpt-5.6-terra") if payload.agent_id == "openai" else None,
                         "provider_timeout_seconds": payload.limits.provider_timeout_seconds,
                         "provider_max_retries": 0}
@@ -197,43 +200,8 @@ def create_app(database_url: str | None = None, start_worker: bool = True) -> Fa
     def suite():
         with session_factory() as db:
             runs = db.scalars(select(Run)).all()
-            evaluations = {row.run_id: row for row in db.scalars(select(Evaluation)).all()}
-            passing = sum(evaluation.outcome == "pass" for evaluation in evaluations.values())
-            conclusive = len(evaluations)
-            history = {"passing": passing, "conclusive": conclusive,
-                       "inconclusive": sum(run.status == "inconclusive" for run in runs),
-                       "reliability_score": 100 * passing / conclusive if conclusive else None}
-            scenario_hashes = {scenario_id: canonical_hash(scenario.model_dump(mode="json"))
-                               for scenario_id, scenario in scenarios.items()}
-            agent_ids = sorted({agent["id"] for agent in configured_agents()} | {run.agent_id for run in runs})
-            agent_results = []
-            for agent_id in agent_ids:
-                scenario_results = []
-                for scenario_id, scenario_hash in scenario_hashes.items():
-                    samples = [run for run in runs if run.agent_id == agent_id and run.scenario_id == scenario_id
-                               and run.scenario_hash == scenario_hash
-                               and (run.status == "inconclusive" or
-                                    (run.id in evaluations and evaluations[run.id].evaluator_version == EVALUATOR_VERSION))]
-                    outcomes = [evaluations[run.id].outcome for run in samples
-                                if run.id in evaluations and evaluations[run.id].evaluator_version == EVALUATOR_VERSION]
-                    scenario_passing = outcomes.count("pass")
-                    scenario_conclusive = len(outcomes)
-                    scenario_results.append({"scenario_id": scenario_id, "passing": scenario_passing,
-                                             "conclusive": scenario_conclusive,
-                                             "inconclusive": sum(run.status == "inconclusive" for run in samples),
-                                             "sample_count": len(samples),
-                                             "pass_rate": 100 * scenario_passing / scenario_conclusive if scenario_conclusive else None})
-                completed = sum(row["conclusive"] > 0 for row in scenario_results)
-                agent_results.append({"agent_id": agent_id, "scenario_count": len(scenario_results),
-                                      "completed_scenarios": completed,
-                                      "suite_score": sum(row["pass_rate"] for row in scenario_results) / len(scenario_results)
-                                      if completed == len(scenario_results) and scenario_results else None,
-                                      "passing": sum(row["passing"] for row in scenario_results),
-                                      "conclusive": sum(row["conclusive"] for row in scenario_results),
-                                      "inconclusive": sum(row["inconclusive"] for row in scenario_results),
-                                      "sample_count": sum(row["sample_count"] for row in scenario_results),
-                                      "scenarios": scenario_results})
-            return {"scenario_set": list(scenario_hashes), "agents": agent_results, "history": history}
+            evaluations = db.scalars(select(Evaluation)).all()
+            return build_suite(scenarios, runs, evaluations)
 
     return app
 

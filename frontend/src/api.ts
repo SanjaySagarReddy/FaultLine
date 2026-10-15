@@ -2,12 +2,12 @@ export type Check = { name: string; passed: boolean }
 export type Evaluation = { evaluator_version: string; checks: Check[]; metrics: Record<string, unknown>; outcome: 'pass' | 'fail'; explanation: string }
 export type Fault = { tool: string; effect: string; attempt: number }
 export type Scenario = { id: string; name: string; severity: string; task: string; version: string; content_hash: string; faults: Fault[] }
-export type Agent = { id: string; name: string; configured: boolean; model?: string }
+export type Agent = { id: string; name: string; configured: boolean; model: string | null; implementation_version: string; prompt_version: string; provider_max_retries: number }
 export type Run = { id: string; scenario_id: string; scenario_hash: string; tool_manifest_hash: string; agent_id: string; agent_config: Record<string, unknown>; fault_plan: Fault[]; limits: Record<string, number>; status: string; termination_reason: string | null; final_answer: string | null; created_at: string; evaluation: Evaluation | null }
 export type TraceEvent = { seq: number; timestamp_utc: string; type: string; source: string; call_id: string | null; payload: Record<string, unknown> }
 export type ScenarioRate = { scenario_id: string; passing: number; conclusive: number; inconclusive: number; sample_count: number; pass_rate: number | null }
-export type AgentSuite = { agent_id: string; suite_score: number | null; scenario_count: number; completed_scenarios: number; passing: number; conclusive: number; inconclusive: number; sample_count: number; scenarios: ScenarioRate[] }
-export type Suite = { scenario_set: string[]; agents: AgentSuite[]; history: { passing: number; conclusive: number; inconclusive: number; reliability_score: number | null } }
+export type SuiteCohort = { cohort_id: string; agent_id: string; agent_config: { id: string; implementation_version: string; prompt_version: string; model: string | null; provider_timeout_seconds: number; provider_max_retries: number }; limits: Record<string, number>; suite_score: number | null; scenario_count: number; completed_scenarios: number; passing: number; conclusive: number; inconclusive: number; sample_count: number; scenarios: ScenarioRate[] }
+export type Suite = { scenario_set: string[]; scenario_conditions: Record<string, { scenario_hash: string; tool_manifest_hash: string; fault_plan_hash: string }>; suite_definition_hash: string; evaluator_version: string; cohorts: SuiteCohort[]; history: { passing: number; conclusive: number; inconclusive: number; reliability_score: number | null } }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, init)

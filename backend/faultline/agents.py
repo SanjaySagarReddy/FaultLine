@@ -7,6 +7,9 @@ from typing import Protocol
 
 from .errors import ProviderFailure
 
+AGENT_IMPLEMENTATION_VERSIONS = {"baseline": "baseline-agent-v1", "openai": "openai-adapter-v1"}
+BASELINE_PROMPT_VERSION = "baseline-v1"
+
 
 @dataclass
 class ToolCall:
@@ -126,9 +129,13 @@ class OpenAIAgent:
 
 
 def configured_agents() -> list[dict]:
-    agents = [{"id": "baseline", "name": "Deterministic baseline", "configured": True}]
+    agents = [{"id": "baseline", "name": "Deterministic baseline", "configured": True,
+               "implementation_version": AGENT_IMPLEMENTATION_VERSIONS["baseline"],
+               "prompt_version": BASELINE_PROMPT_VERSION, "model": None, "provider_max_retries": 0}]
     agents.append({"id": "openai", "name": "OpenAI Responses", "configured": bool(os.getenv("OPENAI_API_KEY")),
-                   "model": os.getenv("OPENAI_MODEL", "gpt-5.6-terra")})
+                   "model": os.getenv("OPENAI_MODEL", "gpt-5.6-terra"),
+                   "implementation_version": AGENT_IMPLEMENTATION_VERSIONS["openai"],
+                   "prompt_version": OpenAIAgent.PROMPT_VERSION, "provider_max_retries": 0})
     return agents
 
 

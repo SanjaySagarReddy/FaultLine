@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api, type Agent, type Run, type Scenario, type Suite, type TraceEvent } from './api'
-import { AgentMetric, SuiteOverview } from './SuiteOverview'
+import { AgentMetric, SuiteOverview, matchingCohort } from './SuiteOverview'
 
 function label(value: string) { return value.replaceAll('_', ' ') }
 function short(id: string) { return id.slice(0, 8) }
@@ -64,7 +64,8 @@ export default function App() {
   useEffect(() => { const refresh = () => Promise.all([api.runs(), api.suite()]).then(([r, s]) => { setRuns(r); setSuite(s) }).catch(e => setError(e.message)); refresh(); const timer = setInterval(refresh, 2000); return () => clearInterval(timer) }, [])
   useEffect(() => { if (!selectedRunId) return; const refresh = () => Promise.all([api.run(selectedRunId), api.events(selectedRunId)]).then(([r, e]) => { setSelectedRun(r); setEvents(e.events) }).catch(e => setError(e.message)); refresh(); const timer = setInterval(refresh, 1500); return () => clearInterval(timer) }, [selectedRunId])
   const currentScenario = useMemo(() => scenarios.find(s => s.id === selectedScenario), [scenarios, selectedScenario])
-  const selectedAgentSuite = suite?.agents.find(agent => agent.agent_id === selectedAgent)
+  const selectedAgentDefinition = agents.find(agent => agent.id === selectedAgent)
+  const selectedCohort = matchingCohort(suite, selectedAgentDefinition, model, limits)
 
   async function startRun() {
     setBusy(true); setError(''); setComparison(null)
@@ -76,7 +77,7 @@ export default function App() {
   async function compare() { setError(''); try { const result = await api.compare(compareIds); setComparison(result.runs) } catch (e) { setError((e as Error).message) } }
 
   return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">F<span>/</span></div><div><strong>FAULTLINE</strong><small>AGENT RELIABILITY LAB</small></div></div><div className="nav-label">WORKSPACE</div><div className="nav-item active"><span>◫</span> Workbench</div><div className="nav-item"><span>≋</span> Run history</div><div className="sidebar-bottom"><div className="live-dot" /> LOCAL SIMULATOR <span className="version">v1.0</span></div></aside>
-    <main><header className="topbar"><div><span className="breadcrumb">WORKSPACE <span>/</span> WORKBENCH</span><h1>Agent reliability, <em>measured.</em></h1><p>Test the action, inspect the trace, trust the state.</p></div><AgentMetric result={selectedAgentSuite} /></header>
+    <main><header className="topbar"><div><span className="breadcrumb">WORKSPACE <span>/</span> WORKBENCH</span><h1>Agent reliability, <em>measured.</em></h1><p>Test the action, inspect the trace, trust the state.</p></div><AgentMetric agent={selectedAgentDefinition} selectedModel={model} limits={limits} result={selectedCohort} scenarioCount={suite?.scenario_set.length ?? scenarios.length} /></header>
       {error && <div className="error-banner" role="alert">{error}<button onClick={() => setError('')}>×</button></div>}
       <div className="content-grid"><section className="panel configure"><div className="panel-heading"><div><p className="eyebrow">01 / CONFIGURE</p><h2>New benchmark run</h2></div><span className="step-icon">↗</span></div>
         <label htmlFor="scenario">SCENARIO</label><select id="scenario" value={selectedScenario} onChange={e => setSelectedScenario(e.target.value)}>{scenarios.map(s => <option value={s.id} key={s.id}>{s.name}</option>)}</select>

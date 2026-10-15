@@ -10,3 +10,7 @@ frontend/dist/
 frontend/playwright-report/
 frontend/test-results/
 .env
+.env.*
+*.pem
+*.key
+*.p12

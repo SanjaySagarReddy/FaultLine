@@ -65,7 +65,7 @@ def test_all_curated_scenarios_pass_with_baseline(tmp_path):
         assert result["scenario_hash"] and result["tool_manifest_hash"]
         assert result["evaluation"]["evaluator_version"]
         assert client.get(f"/api/runs/{run_id}/events").json()["events"][0]["timestamp_utc"].endswith("Z")
-    assert {row["agent_id"]: row for row in client.get("/api/suite").json()["agents"]}["baseline"]["suite_score"] == 100
+    assert {row["agent_id"]: row for row in client.get("/api/suite").json()["cohorts"]}["baseline"]["suite_score"] == 100
 
 
 def test_response_loss_commits_once_and_idempotent_retry(tmp_path):
@@ -287,7 +287,7 @@ def test_typed_provider_and_infrastructure_failures_leave_denominator(tmp_path, 
     suite = client.get("/api/suite").json()
     assert suite["history"]["conclusive"] == 1
     assert suite["history"]["inconclusive"] == 2
-    baseline = next(row for row in suite["agents"] if row["agent_id"] == "baseline")
+    baseline = next(row for row in suite["cohorts"] if row["agent_id"] == "baseline")
     normal = next(row for row in baseline["scenarios"] if row["scenario_id"] == "normal")
     assert normal["conclusive"] == 1 and normal["inconclusive"] == 2 and normal["sample_count"] == 3
 
@@ -310,13 +310,14 @@ def test_suite_scores_each_agent_over_fixed_scenario_set(tmp_path):
         with app.state.session_factory.begin() as db:
             run = db.get(Run, llm_id)
             run.agent_id = "openai"
-            run.agent_config = {**run.agent_config, "id": "openai", "model": "mock-model"}
+            run.agent_config = {**run.agent_config, "id": "openai", "model": "mock-model",
+                                "prompt_version": "openai-agent-v1", "implementation_version": "openai-adapter-v1"}
         assert finish(app, llm_id, NoActionAgent())[1].outcome == "fail"
 
     suite = client.get("/api/suite").json()
     assert set(suite["scenario_set"]) == set(scenario_ids)
     assert suite["history"] == {"passing": 5, "conclusive": 10, "inconclusive": 0, "reliability_score": 50.0}
-    by_agent = {item["agent_id"]: item for item in suite["agents"]}
+    by_agent = {item["agent_id"]: item for item in suite["cohorts"]}
     assert by_agent["baseline"]["suite_score"] == 100.0
     assert by_agent["openai"]["suite_score"] == 0.0
     assert all(row["sample_count"] == 1 and row["conclusive"] == 1 for row in by_agent["baseline"]["scenarios"])
@@ -324,7 +325,7 @@ def test_suite_scores_each_agent_over_fixed_scenario_set(tmp_path):
 
     extra_id = start(client, "normal")
     assert finish(app, extra_id, NoActionAgent())[1].outcome == "fail"
-    updated = {item["agent_id"]: item for item in client.get("/api/suite").json()["agents"]}
+    updated = {item["agent_id"]: item for item in client.get("/api/suite").json()["cohorts"]}
     assert updated["baseline"]["suite_score"] == 90.0
     normal = next(row for row in updated["baseline"]["scenarios"] if row["scenario_id"] == "normal")
     assert normal["pass_rate"] == 50.0 and normal["sample_count"] == 2
@@ -348,3 +349,104 @@ def test_mocked_openai_call_loop():
     assert calls[1]["input"][-1]["call_id"] == "fc1"
     assert calls[0]["parallel_tool_calls"] is False
     assert agent.token_usage == {"input_tokens": 18, "output_tokens": 8}
+
+
+def test_two_models_of_same_agent_have_separate_suite_scores(tmp_path):
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    scenario_ids = [row["id"] for row in client.get("/api/scenarios").json()]
+
+    class NoActionAgent:
+        token_usage = {}
+
+        def next_action(self, context):
+            return FinalAnswer("Done")
+
+    for scenario_id in scenario_ids:
+        for model, agent in (("model-good", BaselineAgent()), ("model-bad", NoActionAgent())):
+            run_id = start(client, scenario_id)
+            with app.state.session_factory.begin() as db:
+                run = db.get(Run, run_id)
+                run.agent_id = "openai"
+                run.agent_config = {**run.agent_config, "id": "openai", "model": model,
+                                    "prompt_version": "openai-agent-v1", "implementation_version": "openai-adapter-v1"}
+            finish(app, run_id, agent)
+
+    cohorts = [row for row in client.get("/api/suite").json()["cohorts"] if row["agent_id"] == "openai"]
+    assert {row["agent_config"]["model"]: row["suite_score"] for row in cohorts} == {"model-good": 100.0, "model-bad": 0.0}
+    assert all(row["conclusive"] == len(scenario_ids) for row in cohorts)
+
+
+def test_same_model_with_different_limits_has_separate_suite_scores(tmp_path):
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    scenario_ids = [row["id"] for row in client.get("/api/scenarios").json()]
+    for scenario_id in scenario_ids:
+        default_id = start(client, scenario_id)
+        assert finish(app, default_id)[1].outcome == "pass"
+        limited = client.post("/api/runs", json={"scenario_id": scenario_id, "limits": {"max_turns": 1}}).json()["id"]
+        assert finish(app, limited)[1].outcome == "fail"
+
+    cohorts = [row for row in client.get("/api/suite").json()["cohorts"] if row["agent_id"] == "baseline"]
+    assert {row["limits"]["max_turns"]: row["suite_score"] for row in cohorts} == {12: 100.0, 1: 0.0}
+
+
+def test_noncanonical_and_old_versions_stay_out_of_current_suite(tmp_path):
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    for scenario in client.get("/api/scenarios").json():
+        run_id = start(client, scenario["id"])
+        assert finish(app, run_id)[1].outcome == "pass"
+
+    class NoActionAgent:
+        token_usage = {}
+
+        def next_action(self, context):
+            return FinalAnswer("Done")
+
+    for kind in ("fault", "scenario", "tool", "evaluator"):
+        run_id = start(client)
+        if kind != "evaluator":
+            with app.state.session_factory.begin() as db:
+                run = db.get(Run, run_id)
+                if kind == "fault":
+                    run.fault_plan = [{"tool": "lookup_customer", "attempt": 1, "stage": "before_dispatch",
+                                       "effect": "transient_error", "delay_ms": 0}]
+                elif kind == "scenario":
+                    run.scenario_hash = "legacy-scenario-hash"
+                else:
+                    run.tool_manifest_hash = "legacy-tool-hash"
+        assert finish(app, run_id, NoActionAgent())[1].outcome == "fail"
+        if kind == "evaluator":
+            with app.state.session_factory.begin() as db:
+                db.get(Evaluation, run_id).evaluator_version = "0.9.0"
+
+    suite = client.get("/api/suite").json()
+    cohort = next(row for row in suite["cohorts"] if row["agent_id"] == "baseline")
+    assert cohort["suite_score"] == 100.0 and cohort["conclusive"] == 5
+    assert suite["history"]["conclusive"] == 9
+    assert suite["history"]["passing"] == 5
+
+
+def test_crash_after_refund_keeps_true_business_checks_and_names_failure(tmp_path):
+    app = make_app(tmp_path)
+
+    class CrashAfterRefund:
+        token_usage = {}
+
+        def __init__(self):
+            self.baseline = BaselineAgent()
+
+        def next_action(self, context):
+            action = self.baseline.next_action(context)
+            if isinstance(action, FinalAnswer) and context.history[-1][0].name == "execute_refund":
+                raise RuntimeError("adapter crashed after refund")
+            return action
+
+    run_id = start(TestClient(app))
+    status, evaluation = finish(app, run_id, CrashAfterRefund())
+    assert status == "finished" and evaluation.outcome == "fail"
+    assert evaluation.metrics["business_correct"] is True
+    assert evaluation.metrics["safety_clear"] is True
+    assert "agent_execution_error" in evaluation.explanation
+    assert {row["name"]: row["passed"] for row in evaluation.checks}["agent_completed_normally"] is False

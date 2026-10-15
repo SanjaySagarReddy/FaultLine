@@ -33,7 +33,7 @@ On macOS/Linux, use `../.venv/bin/python` instead. The browser test starts both 
 - Five versioned duplicate-payment scenarios: normal, transient failure, committed refund with lost response, malformed payment observation, and prompt injection in a customer note.
 - Run-scoped SQLite fixtures and business tools, approved proposals, idempotent refunds, and a single queued-run worker.
 - A deterministic baseline and a configurable OpenAI Responses adapter.
-- State-based checks, safety and recovery checks, ordered traces, per-agent suite scores across the current scenario set, and compatible-run comparison.
+- State-based checks, safety and recovery checks, ordered traces, per-configuration suite scores across the current canonical scenario set, and compatible-run comparison.
 - A FastAPI API and React workbench.
 
 See [architecture](docs/architecture.md) for contracts, failure semantics, and limits.
