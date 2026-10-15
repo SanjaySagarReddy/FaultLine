@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { api, type Agent, type Run, type Scenario, type Suite, type TraceEvent } from './api'
+import { api, type Agent, type Fault, type Run, type Scenario, type Suite, type TraceEvent } from './api'
 import { AgentMetric, SuiteOverview, matchingCohort } from './SuiteOverview'
+import { FaultControls } from './FaultControls'
 
 function label(value: string) { return value.replaceAll('_', ' ') }
 function short(id: string) { return id.slice(0, 8) }
@@ -52,6 +53,7 @@ export default function App() {
   const [selectedAgent, setSelectedAgent] = useState('baseline')
   const [model, setModel] = useState('')
   const [limits, setLimits] = useState({ max_turns: 12, max_tool_calls: 20, run_timeout_seconds: 120, provider_timeout_seconds: 25 })
+  const [faultPlan, setFaultPlan] = useState<Fault[] | undefined>(undefined)
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [selectedRun, setSelectedRun] = useState<Run | null>(null)
   const [events, setEvents] = useState<TraceEvent[]>([])
@@ -69,7 +71,7 @@ export default function App() {
 
   async function startRun() {
     setBusy(true); setError(''); setComparison(null)
-    try { const created = await api.start(selectedScenario, selectedAgent, selectedAgent === 'openai' ? model : undefined, limits); setSelectedRunId(created.id); setCompareIds([]) }
+    try { const created = await api.start(selectedScenario, selectedAgent, selectedAgent === 'openai' ? model : undefined, limits, faultPlan); setSelectedRunId(created.id); setCompareIds([]) }
     catch (e) { setError((e as Error).message) }
     finally { setBusy(false) }
   }
@@ -80,8 +82,9 @@ export default function App() {
     <main><header className="topbar"><div><span className="breadcrumb">WORKSPACE <span>/</span> WORKBENCH</span><h1>Agent reliability, <em>measured.</em></h1><p>Test the action, inspect the trace, trust the state.</p></div><AgentMetric agent={selectedAgentDefinition} selectedModel={model} limits={limits} result={selectedCohort} scenarioCount={suite?.scenario_set.length ?? scenarios.length} /></header>
       {error && <div className="error-banner" role="alert">{error}<button onClick={() => setError('')}>×</button></div>}
       <div className="content-grid"><section className="panel configure"><div className="panel-heading"><div><p className="eyebrow">01 / CONFIGURE</p><h2>New benchmark run</h2></div><span className="step-icon">↗</span></div>
-        <label htmlFor="scenario">SCENARIO</label><select id="scenario" value={selectedScenario} onChange={e => setSelectedScenario(e.target.value)}>{scenarios.map(s => <option value={s.id} key={s.id}>{s.name}</option>)}</select>
+        <label htmlFor="scenario">SCENARIO</label><select id="scenario" value={selectedScenario} onChange={e => { setSelectedScenario(e.target.value); setFaultPlan(undefined) }}>{scenarios.map(s => <option value={s.id} key={s.id}>{s.name}</option>)}</select>
         {currentScenario && <div className="scenario-detail"><div><span className={`severity severity-${currentScenario.severity}`}>{currentScenario.severity} severity</span><span className="scenario-version">v{currentScenario.version}</span></div><p>{currentScenario.task}</p><span className="fault-tag">{currentScenario.faults.length ? `${currentScenario.faults[0].effect.replaceAll('_', ' ')} · ${currentScenario.faults[0].tool}` : 'No injected fault'}</span></div>}
+        {currentScenario && <FaultControls key={currentScenario.id} scenario={currentScenario} maxToolCalls={limits.max_tool_calls} onChange={setFaultPlan} />}
         <label htmlFor="agent">AGENT</label><select id="agent" value={selectedAgent} onChange={e => setSelectedAgent(e.target.value)}>{agents.map(a => <option value={a.id} key={a.id} disabled={!a.configured}>{a.name}{a.configured ? '' : ' · set OPENAI_API_KEY'}</option>)}</select>
         {selectedAgent === 'openai' && <><label htmlFor="model">MODEL</label><input id="model" value={model} onChange={e => setModel(e.target.value)} placeholder={agents.find(a => a.id === 'openai')?.model || 'Model ID'} /></>}
         <details className="limit-options"><summary>Run limits</summary><div className="limit-grid">{([['max_turns', 'Max turns'], ['max_tool_calls', 'Max tool calls'], ['run_timeout_seconds', 'Run timeout (seconds)'], ['provider_timeout_seconds', 'Provider timeout (seconds)']] as const).map(([key, title]) => <div key={key}><label htmlFor={key}>{title}</label><input id={key} type="number" min={1} value={limits[key]} onChange={e => setLimits(old => ({ ...old, [key]: Number(e.target.value) }))} /></div>)}</div></details>
@@ -92,6 +95,6 @@ export default function App() {
         <button className="secondary" disabled={compareIds.length < 2} onClick={compare}>Compare selected ({compareIds.length})</button>
       </section></div>
       <SuiteOverview suite={suite} />
-      {comparison ? <Comparison runs={comparison} /> : selectedRun ? <div className="results"><div className="result-heading"><div><p className="eyebrow">03 / INSPECT</p><h2>Run {short(selectedRun.id)}</h2></div><span className="result-meta">{selectedRun.scenario_id} · {selectedRun.agent_id} · {selectedRun.termination_reason || selectedRun.status}</span></div><div className="result-grid"><Scorecard run={selectedRun} /><Trace events={events} /></div><div className="metadata"><span>Scenario hash: {selectedRun.scenario_hash.slice(0, 12)}</span><span>Tool hash: {selectedRun.tool_manifest_hash.slice(0, 12)}</span><span>Evaluator: {selectedRun.evaluation?.evaluator_version || 'pending'}</span></div><details className="repro"><summary>Run configuration and reproducibility</summary><pre>{JSON.stringify({ scenario_hash: selectedRun.scenario_hash, tool_manifest_hash: selectedRun.tool_manifest_hash, evaluator_version: selectedRun.evaluation?.evaluator_version, agent_config: selectedRun.agent_config, fault_plan: selectedRun.fault_plan, limits: selectedRun.limits }, null, 2)}</pre></details></div> : <section className="intro"><div className="intro-line"/><div><p className="eyebrow">WHY FAULTLINE</p><h2>Words are claims.<br /><em>State is evidence.</em></h2><p>Faultline checks the simulated business state after an agent runs, then shows every tool call, fault, and recovery step that led there.</p></div><div className="intro-number">01—05 <span>CURATED SCENARIOS</span></div></section>}
+      {comparison ? <Comparison runs={comparison} /> : selectedRun ? <div className="results"><div className="result-heading"><div><p className="eyebrow">03 / INSPECT</p><h2>Run {short(selectedRun.id)}</h2></div><span className="result-meta">{selectedRun.scenario_id} · {selectedRun.agent_id} · {selectedRun.termination_reason || selectedRun.status}</span></div><div className="result-grid"><Scorecard run={selectedRun} /><Trace events={events} /></div><div className="metadata"><span>Scenario hash: {selectedRun.scenario_hash.slice(0, 12)}</span><span>Tool hash: {selectedRun.tool_manifest_hash.slice(0, 12)}</span><span>Effective fault plan: {selectedRun.fault_plan.length ? selectedRun.fault_plan.map(fault => fault.effect + " on " + fault.tool + " #" + fault.attempt).join(", ") : "none"}</span><span>Evaluator: {selectedRun.evaluation?.evaluator_version || 'pending'}</span></div><details className="repro"><summary>Run configuration and reproducibility</summary><pre>{JSON.stringify({ scenario_hash: selectedRun.scenario_hash, tool_manifest_hash: selectedRun.tool_manifest_hash, evaluator_version: selectedRun.evaluation?.evaluator_version, agent_config: selectedRun.agent_config, fault_plan: selectedRun.fault_plan, limits: selectedRun.limits }, null, 2)}</pre></details></div> : <section className="intro"><div className="intro-line"/><div><p className="eyebrow">WHY FAULTLINE</p><h2>Words are claims.<br /><em>State is evidence.</em></h2><p>Faultline checks the simulated business state after an agent runs, then shows every tool call, fault, and recovery step that led there.</p></div><div className="intro-number">01—05 <span>CURATED SCENARIOS</span></div></section>}
     </main></div>
 }

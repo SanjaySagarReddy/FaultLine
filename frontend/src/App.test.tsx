@@ -1,8 +1,9 @@
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { fireEvent, render, screen } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
 import { Scorecard, Trace } from './App'
 import { AgentMetric, SuiteOverview, matchingCohort } from './SuiteOverview'
-import type { Agent, Run, Suite, SuiteCohort, TraceEvent } from './api'
+import { FaultControls } from './FaultControls'
+import type { Agent, Run, Scenario, Suite, SuiteCohort, TraceEvent } from './api'
 
 const run = { id: 'run-123', scenario_id: 'normal', scenario_hash: 'abc', tool_manifest_hash: 'def', agent_id: 'baseline', agent_config: {}, fault_plan: [], limits: {}, status: 'finished', termination_reason: 'agent_final', final_answer: 'Done', created_at: '2026-10-16T00:00:00Z', evaluation: { evaluator_version: '1.1.0', checks: [{ name: 'expected_payment_refunded_once', passed: true }], metrics: { business_correct: true, safety_clear: true, behavior_checks_pass: true, tool_call_count: 5 }, outcome: 'pass' as const, explanation: 'All checks passed.' } } satisfies Run
 
@@ -40,5 +41,22 @@ describe('run presentation', () => {
     expect(screen.getByLabelText('Selected configuration suite score')).toHaveTextContent('model-c')
     expect(screen.getByText(/Pooled history across all agents, configurations, and scenario versions/)).toBeInTheDocument()
     expect(screen.getAllByText(/passing \| n=1/)).toHaveLength(2)
+  })
+})
+
+describe('run fault selection', () => {
+  it('sends a disabled or supported custom plan and restores the scenario default', () => {
+    const scenario: Scenario = { id: 'normal', name: 'Normal', severity: 'low', task: 'Refund', version: '1', content_hash: 'hash', tool_allowlist: ['lookup_customer', 'execute_refund'], faults: [] }
+    const onChange = vi.fn()
+    render(<FaultControls scenario={scenario} maxToolCalls={20} onChange={onChange} />)
+    fireEvent.change(screen.getByLabelText('FAULT PLAN'), { target: { value: 'none' } })
+    expect(onChange).toHaveBeenLastCalledWith([])
+    fireEvent.change(screen.getByLabelText('FAULT PLAN'), { target: { value: 'custom' } })
+    expect(onChange).toHaveBeenLastCalledWith([{ tool: 'lookup_customer', attempt: 1, effect: 'transient_error', stage: 'before_dispatch', delay_ms: 0 }])
+    fireEvent.change(screen.getByLabelText('TOOL'), { target: { value: 'execute_refund' } })
+    fireEvent.change(screen.getByLabelText('EFFECT'), { target: { value: 'response_lost_after_commit' } })
+    expect(onChange).toHaveBeenLastCalledWith([{ tool: 'execute_refund', attempt: 1, effect: 'response_lost_after_commit', stage: 'after_commit', delay_ms: 0 }])
+    fireEvent.change(screen.getByLabelText('FAULT PLAN'), { target: { value: 'default' } })
+    expect(onChange).toHaveBeenLastCalledWith(undefined)
   })
 })

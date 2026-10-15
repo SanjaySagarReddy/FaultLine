@@ -14,7 +14,7 @@ from alembic import command
 from alembic.config import Config
 
 from .agents import AGENT_IMPLEMENTATION_VERSIONS, BASELINE_PROMPT_VERSION, OpenAIAgent, configured_agents
-from .contracts import canonical_hash, load_scenarios, tool_manifest, tool_contract_hash
+from .contracts import FaultRule, canonical_hash, load_scenarios, tool_manifest, tool_contract_hash
 from .evaluation import EVALUATOR_VERSION
 from .models import Base, Evaluation, Run, RunEvent, make_session_factory
 from .runner import RunWorker
@@ -32,6 +32,7 @@ class CreateRunInput(BaseModel):
     scenario_id: str
     agent_id: str = "baseline"
     model: str | None = Field(default=None, max_length=100)
+    fault_plan: list[FaultRule] | None = None
     limits: LimitsInput = Field(default_factory=LimitsInput)
 
 
@@ -126,6 +127,12 @@ def create_app(database_url: str | None = None, start_worker: bool = True) -> Fa
             raise HTTPException(422, "unknown agent")
         if payload.agent_id == "openai" and not os.getenv("OPENAI_API_KEY"):
             raise HTTPException(422, "OpenAI agent is not configured")
+        selected_faults = scenario.faults if payload.fault_plan is None else payload.fault_plan
+        if (len(selected_faults) > payload.limits.max_tool_calls
+                or len({(rule.tool, rule.attempt) for rule in selected_faults}) != len(selected_faults)
+                or any(rule.tool not in scenario.tool_allowlist or rule.attempt > payload.limits.max_tool_calls
+                       for rule in selected_faults)):
+            raise HTTPException(422, "fault plan uses an unavailable tool, duplicate attempt, or unreachable attempt")
         snapshot = scenario.model_dump(mode="json")
         agent_config = {"id": payload.agent_id,
                         "implementation_version": AGENT_IMPLEMENTATION_VERSIONS[payload.agent_id],
@@ -137,7 +144,7 @@ def create_app(database_url: str | None = None, start_worker: bool = True) -> Fa
                   scenario_hash=canonical_hash(snapshot), scenario_snapshot=snapshot,
                   tool_manifest_hash=tool_contract_hash(scenario.tool_allowlist),
                   agent_id=payload.agent_id, agent_config=agent_config,
-                  fault_plan=[fault.model_dump(mode="json") for fault in scenario.faults],
+                  fault_plan=[fault.model_dump(mode="json") for fault in selected_faults],
                   limits=payload.limits.model_dump(), status="queued")
         with session_factory.begin() as db:
             db.add(run)

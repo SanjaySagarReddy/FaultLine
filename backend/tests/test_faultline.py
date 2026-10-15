@@ -289,7 +289,7 @@ def test_typed_provider_and_infrastructure_failures_leave_denominator(tmp_path, 
     assert suite["history"]["inconclusive"] == 2
     baseline = next(row for row in suite["cohorts"] if row["agent_id"] == "baseline")
     normal = next(row for row in baseline["scenarios"] if row["scenario_id"] == "normal")
-    assert normal["conclusive"] == 1 and normal["inconclusive"] == 2 and normal["sample_count"] == 3
+    assert normal["conclusive"] == 1 and normal["inconclusive"] == 0 and normal["sample_count"] == 1
 
 
 def test_suite_scores_each_agent_over_fixed_scenario_set(tmp_path):
@@ -450,3 +450,85 @@ def test_crash_after_refund_keeps_true_business_checks_and_names_failure(tmp_pat
     assert evaluation.metrics["safety_clear"] is True
     assert "agent_execution_error" in evaluation.explanation
     assert {row["name"]: row["passed"] for row in evaluation.checks}["agent_completed_normally"] is False
+
+
+def test_old_inconclusive_run_stays_only_in_pooled_history(tmp_path):
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    passing_id = start(client)
+    assert finish(app, passing_id)[1].outcome == "pass"
+
+    class ProviderDown:
+        token_usage = {}
+
+        def next_action(self, context):
+            raise ProviderFailure("provider unavailable")
+
+    current_id = start(client)
+    assert finish(app, current_id, ProviderDown()) == ("inconclusive", None)
+    old_id = start(client)
+    assert finish(app, old_id, ProviderDown()) == ("inconclusive", None)
+    with app.state.session_factory.begin() as db:
+        run = db.get(Run, old_id)
+        run.agent_config = {**run.agent_config, "implementation_version": "baseline-agent-v0"}
+
+    suite = client.get("/api/suite").json()
+    assert suite["history"]["conclusive"] == 1
+    assert suite["history"]["inconclusive"] == 2
+    assert len(suite["cohorts"]) == 1
+    normal = next(row for row in suite["cohorts"][0]["scenarios"] if row["scenario_id"] == "normal")
+    assert normal["conclusive"] == 1 and normal["inconclusive"] == 0 and normal["sample_count"] == 1
+
+
+def test_run_fault_override_is_snapshotted_and_excluded_from_canonical_suite(tmp_path):
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    canonical_id = start(client)
+    assert finish(app, canonical_id)[1].outcome == "pass"
+
+    selected = [{"tool": "lookup_customer", "attempt": 1, "stage": "before_dispatch", "effect": "transient_error"}]
+    response = client.post("/api/runs", json={"scenario_id": "normal", "fault_plan": selected})
+    assert response.status_code == 202
+    custom_id = response.json()["id"]
+    assert finish(app, custom_id)[1].outcome == "pass"
+    custom = client.get("/api/runs/" + custom_id).json()
+    assert custom["fault_plan"] == [{**selected[0], "delay_ms": 0}]
+    events = client.get("/api/runs/" + custom_id + "/events", params={"limit": 500}).json()["events"]
+    assert any(row["type"] == "fault_applied" and row["payload"]["fault"] == "transient_error" for row in events)
+    suite = client.get("/api/suite").json()
+    normal = next(row for row in suite["cohorts"][0]["scenarios"] if row["scenario_id"] == "normal")
+    assert normal["sample_count"] == 1 and normal["passing"] == 1
+    assert suite["history"]["conclusive"] == 2
+
+
+def test_fault_can_be_disabled_without_changing_canonical_default(tmp_path):
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    default_id = start(client, "transient")
+    assert finish(app, default_id)[1].outcome == "pass"
+    assert client.get("/api/runs/" + default_id).json()["fault_plan"]
+    disabled = client.post("/api/runs", json={"scenario_id": "transient", "fault_plan": []})
+    assert disabled.status_code == 202
+    disabled_id = disabled.json()["id"]
+    assert finish(app, disabled_id)[1].outcome == "pass"
+    assert client.get("/api/runs/" + disabled_id).json()["fault_plan"] == []
+    events = client.get("/api/runs/" + disabled_id + "/events", params={"limit": 500}).json()["events"]
+    assert not any(row["type"] == "fault_applied" for row in events)
+    suite = client.get("/api/suite").json()
+    transient = next(row for row in suite["cohorts"][0]["scenarios"] if row["scenario_id"] == "transient")
+    assert transient["sample_count"] == 1 and suite["history"]["conclusive"] == 2
+
+
+def test_invalid_fault_plans_are_rejected(tmp_path):
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    valid = {"tool": "lookup_customer", "attempt": 1, "stage": "before_dispatch", "effect": "transient_error"}
+    for plan in (
+        [{**valid, "tool": "delete_database"}],
+        [{**valid, "stage": "after_commit", "effect": "response_lost_after_commit"}],
+        [valid, valid],
+        [{**valid, "attempt": 21}],
+    ):
+        response = client.post("/api/runs", json={"scenario_id": "normal", "fault_plan": plan})
+        assert response.status_code == 422, (plan, response.text)
+    assert client.get("/api/runs").json() == []

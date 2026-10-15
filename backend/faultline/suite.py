@@ -34,16 +34,16 @@ def build_suite(scenarios: dict, runs: list, evaluations: list) -> dict:
     grouped = {}
     for run in runs:
         expected = conditions.get(run.scenario_id)
-        if expected is None or run.status not in {"finished", "inconclusive"}:
+        # Unevaluated runs have no trustworthy evaluator-version provenance.
+        # They remain visible only in pooled history and never enter a score.
+        if expected is None or run.status != "finished":
             continue
         if (run.scenario_hash != expected["scenario_hash"]
                 or run.tool_manifest_hash != expected["tool_manifest_hash"]
                 or canonical_hash(run.fault_plan) != expected["fault_plan_hash"]):
             continue
         evaluation = by_run.get(run.id)
-        if run.status == "finished" and (evaluation is None or evaluation.evaluator_version != EVALUATOR_VERSION):
-            continue
-        if evaluation is not None and evaluation.evaluator_version != EVALUATOR_VERSION:
+        if evaluation is None or evaluation.evaluator_version != EVALUATOR_VERSION:
             continue
         agent_config = {key: value for key, value in run.agent_config.items() if key != "token_usage"}
         if not REQUIRED_AGENT_CONFIG.issubset(agent_config) or agent_config["id"] != run.agent_id:
