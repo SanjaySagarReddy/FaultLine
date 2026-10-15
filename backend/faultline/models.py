@@ -25,6 +25,9 @@ class Run(Base):
     agent_id: Mapped[str] = mapped_column(String(40))
     agent_config: Mapped[dict] = mapped_column(JSON)
     fault_plan: Mapped[list] = mapped_column(JSON)
+    fault_plan_source: Mapped[str] = mapped_column(
+        String(20), default="legacy_unknown", server_default="legacy_unknown"
+    )
     limits: Mapped[dict] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
     termination_reason: Mapped[str | None] = mapped_column(String(120), nullable=True)

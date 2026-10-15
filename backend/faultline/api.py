@@ -58,6 +58,7 @@ def _run_json(run: Run, evaluation: Evaluation | None = None) -> dict:
     return {"id": run.id, "scenario_id": run.scenario_id, "scenario_version": run.scenario_version,
             "scenario_hash": run.scenario_hash, "tool_manifest_hash": run.tool_manifest_hash,
             "agent_id": run.agent_id, "agent_config": run.agent_config, "fault_plan": run.fault_plan,
+            "fault_plan_source": run.fault_plan_source,
             "limits": run.limits, "status": run.status, "termination_reason": run.termination_reason,
             "final_answer": run.final_answer, "created_at": _utc_iso(run.created_at),
             "started_at": _utc_iso(run.started_at) if run.started_at else None,
@@ -145,6 +146,7 @@ def create_app(database_url: str | None = None, start_worker: bool = True) -> Fa
                   tool_manifest_hash=tool_contract_hash(scenario.tool_allowlist),
                   agent_id=payload.agent_id, agent_config=agent_config,
                   fault_plan=[fault.model_dump(mode="json") for fault in selected_faults],
+                  fault_plan_source="scenario_default" if payload.fault_plan is None else "run_override",
                   limits=payload.limits.model_dump(), status="queued")
         with session_factory.begin() as db:
             db.add(run)
@@ -197,7 +199,8 @@ def create_app(database_url: str | None = None, start_worker: bool = True) -> Fa
             evaluations = [db.get(Evaluation, run.id) for run in runs]
             if any(e is None for e in evaluations):
                 raise HTTPException(422, "runs must be conclusive")
-            keys = {(r.scenario_hash, r.tool_manifest_hash, canonical_hash(r.fault_plan), e.evaluator_version)
+            keys = {(r.scenario_hash, r.tool_manifest_hash, canonical_hash(r.fault_plan),
+                     canonical_hash(r.limits), e.evaluator_version)
                     for r, e in zip(runs, evaluations)}
             if len(keys) != 1:
                 raise HTTPException(422, "incompatible runs")

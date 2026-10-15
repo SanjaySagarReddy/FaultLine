@@ -38,7 +38,8 @@ def build_suite(scenarios: dict, runs: list, evaluations: list) -> dict:
         # They remain visible only in pooled history and never enter a score.
         if expected is None or run.status != "finished":
             continue
-        if (run.scenario_hash != expected["scenario_hash"]
+        if (run.fault_plan_source != "scenario_default"
+                or run.scenario_hash != expected["scenario_hash"]
                 or run.tool_manifest_hash != expected["tool_manifest_hash"]
                 or canonical_hash(run.fault_plan) != expected["fault_plan_hash"]):
             continue

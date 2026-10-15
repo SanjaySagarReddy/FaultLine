@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from .models import Run, RunEvent, SimPayment, RefundAction, Evaluation
 from .gateway import append_event
 
-EVALUATOR_VERSION = "1.1.0"
+EVALUATOR_VERSION = "1.2.0"
 
 
 def evaluate(db: Session, run: Run, termination_reason: str) -> Evaluation:
