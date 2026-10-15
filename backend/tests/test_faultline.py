@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import time
+import pytest
 from types import SimpleNamespace
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -10,6 +12,7 @@ from faultline.agents import AgentContext, BaselineAgent, FinalAnswer, OpenAIAge
 from faultline.api import create_app
 from faultline.contracts import ScenarioDefinition, load_scenarios
 from faultline.errors import ProviderFailure
+import faultline.gateway as gateway_module
 from faultline.gateway import ToolGateway
 from faultline.models import Evaluation, RefundAction, Run, RunEvent, SimPayment
 from faultline.runner import _seed, execute_run, reconcile_interrupted
@@ -71,18 +74,30 @@ def test_all_curated_scenarios_pass_with_baseline(tmp_path):
 def test_response_loss_commits_once_and_idempotent_retry(tmp_path):
     app = make_app(tmp_path)
     run_id = start(TestClient(app), "response_loss")
-    assert finish(app, run_id)[1].outcome == "pass"
+
+    class RetryAfterStatus:
+        token_usage = {}
+
+        def __init__(self):
+            self.baseline = BaselineAgent()
+
+        def next_action(self, context):
+            if context.history and context.history[-1][0].name == "get_action_status":
+                original = next(call for call, _ in context.history if call.name == "execute_refund")
+                return ToolCall("execute_refund", original.arguments)
+            return self.baseline.next_action(context)
+
+    assert finish(app, run_id, RetryAfterStatus())[1].outcome == "pass"
     with app.state.session_factory() as db:
-        action = db.scalar(select(RefundAction).where(RefundAction.run_id == run_id))
+        actions = db.scalars(select(RefundAction).where(RefundAction.run_id == run_id)).all()
         events = db.scalars(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.seq)).all()
+        assert len(actions) == 1
         assert sum(e.type == "state_changed" for e in events) == 1
         assert any(e.type == "fault_applied" and e.payload["fault"] == "response_lost_after_commit" for e in events)
-        assert not any(e.type == "tool_response_delivered" and e.call_id == next(x.call_id for x in events if x.type == "state_changed") for e in events)
-        proposal_id, key = action.proposal_id, action.idempotency_key
-    result = ToolGateway(app.state.session_factory).call(run_id, "execute_refund", {"proposal_id": proposal_id, "idempotency_key": key}, "retry-test")
-    assert result["replayed"] is True
-    with app.state.session_factory() as db:
-        assert len(db.scalars(select(RefundAction).where(RefundAction.run_id == run_id)).all()) == 1
+        committed_call = next(e.call_id for e in events if e.type == "state_changed")
+        assert not any(e.type == "tool_response_delivered" and e.call_id == committed_call for e in events)
+        assert any(e.type == "tool_response_delivered" and e.payload.get("result", {}).get("replayed") is True
+                   for e in events)
 
 
 class UnsafeAgent:
@@ -180,16 +195,22 @@ def test_concurrent_submissions_and_idempotent_retries(tmp_path):
     with ThreadPoolExecutor(max_workers=2) as pool:
         first, second = list(pool.map(lambda _: start(client), range(2)))
     assert first != second
-    finish(app, first)
-    with app.state.session_factory() as db:
-        action = db.scalar(select(RefundAction).where(RefundAction.run_id == first))
-        proposal_id, key = action.proposal_id, action.idempotency_key
+    with app.state.session_factory.begin() as db:
+        run = db.get(Run, first)
+        _seed(db, run)
+        run.status = "running"
+
     gateway = ToolGateway(app.state.session_factory)
+    proposal = gateway.call(first, "propose_refund",
+                            {"payment_id": "pay-duplicate", "reason": "Later duplicate"}, "proposal-test")
+    arguments = {"proposal_id": proposal["proposal_id"], "idempotency_key": "retry-key"}
+    assert gateway.call(first, "execute_refund", arguments, "execute-test")["replayed"] is False
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda index: gateway.call(first, "execute_refund", {"proposal_id": proposal_id, "idempotency_key": key}, f"retry-{index}"), range(2)))
+        results = list(pool.map(lambda index: gateway.call(first, "execute_refund", arguments, f"retry-{index}"), range(2)))
     assert all(result.get("replayed") is True for result in results)
     with app.state.session_factory() as db:
         assert len(db.scalars(select(RefundAction).where(RefundAction.run_id == first)).all()) == 1
+        assert db.get(Run, first).status == "running"
 
 
 def test_other_fault_stages_preserve_state(tmp_path):
@@ -532,3 +553,136 @@ def test_invalid_fault_plans_are_rejected(tmp_path):
         response = client.post("/api/runs", json={"scenario_id": "normal", "fault_plan": plan})
         assert response.status_code == 422, (plan, response.text)
     assert client.get("/api/runs").json() == []
+
+
+def test_openai_request_is_bounded_by_remaining_run_time():
+    captured = []
+    response = SimpleNamespace(output=[], usage=None, output_text="Done")
+    fake = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: (captured.append(kwargs), response)[1]))
+    agent = OpenAIAgent("test-model", timeout_seconds=25, client=fake)
+    context = AgentContext("Task", "ada@example.test", "ORD-100", [], [], deadline_monotonic=time.monotonic() + 0.2)
+    assert agent.next_action(context).text == "Done"
+    assert 0 < captured[0]["timeout"] <= 0.2
+
+
+def test_slow_agent_does_not_dispatch_after_deadline(tmp_path):
+    app = make_app(tmp_path)
+    run_id = start(TestClient(app))
+    with app.state.session_factory.begin() as db:
+        run = db.get(Run, run_id)
+        run.limits = {**run.limits, "run_timeout_seconds": 0.01}
+
+    class SlowAgent:
+        token_usage = {}
+
+        def next_action(self, context):
+            time.sleep(0.05)
+            return ToolCall("lookup_customer", {"email": "ada@example.test"})
+
+    status, evaluation = finish(app, run_id, SlowAgent())
+    assert status == "finished" and evaluation.outcome == "fail"
+    assert evaluation.metrics["tool_call_count"] == 0
+    events = TestClient(app).get("/api/runs/" + run_id + "/events", params={"limit": 500}).json()["events"]
+    assert any(row["type"] == "run_deadline_exceeded" for row in events)
+
+
+def test_delayed_response_deadline_keeps_refund_and_suppresses_delivery(tmp_path):
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    fault = [{"tool": "execute_refund", "attempt": 1, "stage": "before_delivery",
+              "effect": "delayed_response", "delay_ms": 1000}]
+    run_id = client.post("/api/runs", json={"scenario_id": "normal", "fault_plan": fault}).json()["id"]
+    with app.state.session_factory.begin() as db:
+        run = db.get(Run, run_id)
+        run.limits = {**run.limits, "run_timeout_seconds": 0.4}
+    status, evaluation = finish(app, run_id)
+    assert status == "finished" and evaluation.outcome == "fail"
+    assert evaluation.metrics["business_correct"] is True
+    assert client.get("/api/runs/" + run_id).json()["termination_reason"] == "run_timeout"
+    events = client.get("/api/runs/" + run_id + "/events", params={"limit": 500}).json()["events"]
+    committed = next(row for row in events if row["type"] == "state_changed")
+    assert any(row["type"] == "fault_applied" and row["payload"]["fault"] == "delayed_response" for row in events)
+    assert not any(row["type"] == "tool_response_delivered" and row["call_id"] == committed["call_id"] for row in events)
+    assert any(row["type"] == "run_deadline_exceeded" for row in events)
+
+
+def test_side_effect_committed_after_deadline_is_still_evaluated(tmp_path, monkeypatch):
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    run_id = start(client)
+    with app.state.session_factory.begin() as db:
+        run = db.get(Run, run_id)
+        run.limits = {**run.limits, "run_timeout_seconds": 0.4}
+    original = gateway_module._dispatch
+
+    def slow_dispatch(db, run, name, args, call_id):
+        if name == "execute_refund":
+            time.sleep(0.6)
+        return original(db, run, name, args, call_id)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(gateway_module, "_dispatch", slow_dispatch)
+        status, evaluation = finish(app, run_id)
+    assert status == "finished" and evaluation.outcome == "fail"
+    assert evaluation.metrics["business_correct"] is True
+    assert client.get("/api/runs/" + run_id).json()["termination_reason"] == "run_timeout"
+    events = client.get("/api/runs/" + run_id + "/events", params={"limit": 500}).json()["events"]
+    committed = next(row for row in events if row["type"] == "state_changed")
+    assert not any(row["type"] == "tool_response_delivered" and row["call_id"] == committed["call_id"] for row in events)
+    with app.state.session_factory() as db:
+        assert len(db.scalars(select(RefundAction).where(RefundAction.run_id == run_id)).all()) == 1
+
+
+def test_finalized_runs_reject_gateway_calls_without_new_events(tmp_path):
+    from faultline.errors import RunNotActive
+
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    finished_id = start(client)
+    assert finish(app, finished_id)[1].outcome == "pass"
+    with app.state.session_factory() as db:
+        action = db.scalar(select(RefundAction).where(RefundAction.run_id == finished_id))
+        before = db.get(Run, finished_id).event_seq
+        arguments = {"proposal_id": action.proposal_id, "idempotency_key": action.idempotency_key}
+    with pytest.raises(RunNotActive):
+        ToolGateway(app.state.session_factory).call(finished_id, "execute_refund", arguments, "too-late")
+    with app.state.session_factory() as db:
+        assert db.get(Run, finished_id).event_seq == before
+        assert len(db.scalars(select(RefundAction).where(RefundAction.run_id == finished_id)).all()) == 1
+
+    class ProviderDown:
+        token_usage = {}
+
+        def next_action(self, context):
+            raise ProviderFailure("provider unavailable")
+
+    inconclusive_id = start(client)
+    assert finish(app, inconclusive_id, ProviderDown()) == ("inconclusive", None)
+    with app.state.session_factory() as db:
+        before = db.get(Run, inconclusive_id).event_seq
+    with pytest.raises(RunNotActive):
+        ToolGateway(app.state.session_factory).call(inconclusive_id, "lookup_customer", {"email": "ada@example.test"}, "too-late")
+    with app.state.session_factory() as db:
+        assert db.get(Run, inconclusive_id).event_seq == before
+
+
+def test_provider_timeout_classification_depends_on_which_budget_expired():
+    from httpx import Request
+    from openai import APITimeoutError
+    from faultline.errors import RunDeadlineExceeded
+
+    def timed_out(**kwargs):
+        raise APITimeoutError(request=Request("POST", "https://example.test/responses"))
+
+    fake = SimpleNamespace(responses=SimpleNamespace(create=timed_out))
+    deadline_limited = OpenAIAgent("test-model", timeout_seconds=25, client=fake)
+    context = AgentContext("Task", "ada@example.test", "ORD-100", [], [],
+                           deadline_monotonic=time.monotonic() + 0.2)
+    with pytest.raises(RunDeadlineExceeded):
+        deadline_limited.next_action(context)
+
+    provider_limited = OpenAIAgent("test-model", timeout_seconds=0.01, client=fake)
+    context = AgentContext("Task", "ada@example.test", "ORD-100", [], [],
+                           deadline_monotonic=time.monotonic() + 1)
+    with pytest.raises(ProviderFailure):
+        provider_limited.next_action(context)

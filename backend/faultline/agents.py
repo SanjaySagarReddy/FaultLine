@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
-from .errors import ProviderFailure
+from .errors import ProviderFailure, RunDeadlineExceeded
 
 AGENT_IMPLEMENTATION_VERSIONS = {"baseline": "baseline-agent-v1", "openai": "openai-adapter-v1"}
 BASELINE_PROMPT_VERSION = "baseline-v1"
@@ -30,6 +31,7 @@ class AgentContext:
     order_id: str
     tool_manifest: list[dict]
     history: list[tuple[ToolCall, dict]]
+    deadline_monotonic: float | None = None
 
 
 class Agent(Protocol):
@@ -92,6 +94,7 @@ class OpenAIAgent:
         except OpenAIError as exc:
             raise ProviderFailure(f"provider_configuration_failed: {type(exc).__name__}") from exc
         self.model = model
+        self.timeout_seconds = timeout_seconds
         self.input_messages = []
         self.pending_call_id = None
         self.token_usage = {"input_tokens": 0, "output_tokens": 0}
@@ -103,10 +106,19 @@ class OpenAIAgent:
         else:
             _, observation = context.history[-1]
             self.input_messages.append({"type": "function_call_output", "call_id": self.pending_call_id, "output": json.dumps(observation)})
-        from openai import APIError
+        from openai import APIError, APITimeoutError
+        remaining = None if context.deadline_monotonic is None else context.deadline_monotonic - time.monotonic()
+        if remaining is not None and remaining <= 0.001:
+            raise RunDeadlineExceeded("before_provider_request")
+        request_timeout = min(self.timeout_seconds, remaining) if remaining is not None else self.timeout_seconds
+        deadline_bounded = remaining is not None and remaining <= self.timeout_seconds
         try:
             response = self.client.responses.create(model=self.model, input=list(self.input_messages), tools=context.tool_manifest,
-                                                    parallel_tool_calls=False, store=True)
+                                                    parallel_tool_calls=False, store=True, timeout=request_timeout)
+        except APITimeoutError as exc:
+            if deadline_bounded:
+                raise RunDeadlineExceeded("provider_request") from exc
+            raise ProviderFailure(f"provider_request_failed: {type(exc).__name__}") from exc
         except APIError as exc:
             raise ProviderFailure(f"provider_request_failed: {type(exc).__name__}") from exc
         # Preserve all response items, including reasoning items, when returning tool outputs.

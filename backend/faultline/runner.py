@@ -9,7 +9,7 @@ from sqlalchemy import select, update
 from .agents import AgentContext, FinalAnswer, ToolCall, create_agent
 from .contracts import tool_manifest
 from .evaluation import evaluate
-from .errors import InfrastructureFailure, ProviderFailure
+from .errors import InfrastructureFailure, ProviderFailure, RunDeadlineExceeded, RunNotActive
 from .gateway import ToolGateway, append_event, sanitize_payload
 from .models import Run, SimCustomer, SimPayment
 
@@ -38,6 +38,7 @@ def execute_run(run_id: str, session_factory, agent_override=None):
         config = dict(run.agent_config)
         limits = dict(run.limits)
 
+    deadline = time.monotonic() + limits["run_timeout_seconds"]
     try:
         agent = agent_override or create_agent(config["id"], config)
     except (ProviderFailure, InfrastructureFailure) as exc:
@@ -49,18 +50,28 @@ def execute_run(run_id: str, session_factory, agent_override=None):
         return
     history: list[tuple[ToolCall, dict]] = []
     context = AgentContext(task=scenario["task"], customer_email=scenario["customer_email"],
-                           order_id=scenario["order_id"], tool_manifest=tool_manifest(scenario["tool_allowlist"]), history=history)
-    deadline = time.monotonic() + limits["run_timeout_seconds"]
+                           order_id=scenario["order_id"], tool_manifest=tool_manifest(scenario["tool_allowlist"]),
+                           history=history, deadline_monotonic=deadline)
     termination = "agent_final"
+    deadline_phase = None
     final_text = None
     calls = 0
     for turn in range(limits["max_turns"]):
         if time.monotonic() >= deadline:
             termination = "run_timeout"
+            deadline_phase = "before_agent_turn"
             break
         try:
             action = agent.next_action(context)
+        except RunDeadlineExceeded as exc:
+            termination = "run_timeout"
+            deadline_phase = exc.phase
+            break
         except (ProviderFailure, InfrastructureFailure) as exc:
+            if time.monotonic() >= deadline:
+                termination = "run_timeout"
+                deadline_phase = "during_agent_turn"
+                break
             _inconclusive(run_id, session_factory, f"provider_or_infrastructure_error: {type(exc).__name__}")
             return
         except Exception as exc:
@@ -69,6 +80,7 @@ def execute_run(run_id: str, session_factory, agent_override=None):
             break
         if time.monotonic() >= deadline:
             termination = "run_timeout"
+            deadline_phase = "after_agent_turn"
             break
         if isinstance(action, FinalAnswer):
             if not isinstance(action.text, str):
@@ -96,15 +108,25 @@ def execute_run(run_id: str, session_factory, agent_override=None):
         calls += 1
         call_id = action.call_id or f"call-{calls}"
         try:
-            observation = gateway.call(run_id, action.name, action.arguments, call_id)
-        except InfrastructureFailure as exc:
+            observation = gateway.call(run_id, action.name, action.arguments, call_id,
+                                       deadline_monotonic=deadline)
+        except RunDeadlineExceeded as exc:
+            termination = "run_timeout"
+            deadline_phase = exc.phase
+            break
+        except (InfrastructureFailure, RunNotActive) as exc:
             _inconclusive(run_id, session_factory, f"infrastructure_error: {type(exc).__name__}")
             return
+        if time.monotonic() >= deadline:
+            termination = "run_timeout"
+            deadline_phase = "after_tool_call"
+            break
         history.append((action, observation))
     else:
         termination = "turn_limit"
 
-    _finish_conclusive(run_id, session_factory, termination, final_text, getattr(agent, "token_usage", {}))
+    _finish_conclusive(run_id, session_factory, termination, final_text, getattr(agent, "token_usage", {}),
+                       deadline_phase=deadline_phase)
 
 
 def _agent_error(run_id: str, session_factory, reason: str, exc: Exception):
@@ -113,7 +135,8 @@ def _agent_error(run_id: str, session_factory, reason: str, exc: Exception):
         append_event(db, run, "agent_error", "runner", {"reason": reason, "error_type": type(exc).__name__})
 
 
-def _finish_conclusive(run_id: str, session_factory, termination: str, final_text: str | None, token_usage: dict):
+def _finish_conclusive(run_id: str, session_factory, termination: str, final_text: str | None,
+                       token_usage: dict, deadline_phase: str | None = None):
     try:
         with session_factory.begin() as db:
             run = db.get(Run, run_id)
@@ -121,6 +144,8 @@ def _finish_conclusive(run_id: str, session_factory, termination: str, final_tex
             run.termination_reason = termination
             run.final_answer = final_text
             run.agent_config = {**run.agent_config, "token_usage": token_usage}
+            if termination == "run_timeout":
+                append_event(db, run, "run_deadline_exceeded", "runner", {"phase": deadline_phase or "unknown"})
         with session_factory.begin() as db:
             run = db.get(Run, run_id)
             evaluation = evaluate(db, run, termination)

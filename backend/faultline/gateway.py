@@ -10,7 +10,7 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from .contracts import INPUT_MODELS, OUTPUT_MODELS, FaultRule
-from .errors import InfrastructureFailure
+from .errors import InfrastructureFailure, RunDeadlineExceeded, RunNotActive
 from .models import Run, RunEvent, SimCustomer, SimPayment, RefundProposal, RefundAction
 
 
@@ -119,25 +119,39 @@ def _dispatch(db: Session, run: Run, name: str, args: dict, call_id: str) -> dic
     raise ToolError("unknown_tool", "unknown tool")
 
 
+def _deadline_passed(deadline_monotonic: float | None) -> bool:
+    return deadline_monotonic is not None and time.monotonic() >= deadline_monotonic
+
+
+def _require_active(run: Run | None):
+    if run is None or run.status != "running":
+        raise RunNotActive("run is not executing")
+
+
 class ToolGateway:
     _process_lock = threading.RLock()
 
     def __init__(self, session_factory):
         self.session_factory = session_factory
 
-    def call(self, run_id: str, name: str, arguments: dict, call_id: str) -> dict:
+    def call(self, run_id: str, name: str, arguments: dict, call_id: str,
+             deadline_monotonic: float | None = None) -> dict:
         # One API process owns the worker; serialize gateway writes and event sequence allocation.
         with self._process_lock:
             try:
-                return self._call(run_id, name, arguments, call_id)
-            except InfrastructureFailure:
+                return self._call(run_id, name, arguments, call_id, deadline_monotonic)
+            except (InfrastructureFailure, RunDeadlineExceeded, RunNotActive):
                 raise
             except Exception as exc:
                 raise InfrastructureFailure(f"tool_gateway_failed: {type(exc).__name__}") from exc
 
-    def _call(self, run_id: str, name: str, arguments: dict, call_id: str) -> dict:
+    def _call(self, run_id: str, name: str, arguments: dict, call_id: str,
+              deadline_monotonic: float | None) -> dict:
         with self.session_factory.begin() as db:
             run = db.get(Run, run_id)
+            _require_active(run)
+            if _deadline_passed(deadline_monotonic):
+                raise RunDeadlineExceeded("before_tool_validation")
             attempt = db.scalar(select(func.count()).select_from(RunEvent).where(
                 RunEvent.run_id == run_id, RunEvent.type == "agent_action",
                 RunEvent.payload["tool"].as_string() == name)) + 1
@@ -162,26 +176,55 @@ class ToolGateway:
             if fault and fault.stage == "before_dispatch":
                 append_event(db, run, "fault_applied", "fault_injector", {"tool": name, "fault": fault.effect, "attempt": attempt}, call_id)
                 return {"error": fault.effect, "message": "tool unavailable before dispatch"}
+            if _deadline_passed(deadline_monotonic):
+                raise RunDeadlineExceeded("before_tool_dispatch")
             append_event(db, run, "tool_dispatched", "gateway", {"tool": name}, call_id)
 
         try:
             with self.session_factory.begin() as db:
                 run = db.get(Run, run_id)
+                _require_active(run)
+                if _deadline_passed(deadline_monotonic):
+                    raise RunDeadlineExceeded("before_business_tool")
                 result = _dispatch(db, run, name, parsed, call_id)
                 result = OUTPUT_MODELS[name].model_validate(result).model_dump(mode="json")
         except ToolError as exc:
+            timed_out = _deadline_passed(deadline_monotonic)
             with self.session_factory.begin() as db:
                 run = db.get(Run, run_id)
+                _require_active(run)
                 if exc.critical:
                     append_event(db, run, "prohibited_action_attempt", "business_tool", {"tool": name, "code": exc.code}, call_id)
-                append_event(db, run, "tool_response_delivered", "gateway", {"tool": name, "error": exc.code}, call_id)
+                if not timed_out:
+                    append_event(db, run, "tool_response_delivered", "gateway", {"tool": name, "error": exc.code}, call_id)
+            if timed_out:
+                raise RunDeadlineExceeded("after_tool_rejection")
             return {"error": exc.code, "message": str(exc)}
 
+        if _deadline_passed(deadline_monotonic):
+            raise RunDeadlineExceeded("after_business_tool")
+        fault_recorded = False
         if fault and fault.effect == "delayed_response":
-            time.sleep(fault.delay_ms / 1000)
+            with self.session_factory.begin() as db:
+                run = db.get(Run, run_id)
+                _require_active(run)
+                append_event(db, run, "fault_applied", "fault_injector",
+                             {"tool": name, "fault": fault.effect, "attempt": attempt}, call_id)
+            fault_recorded = True
+            delay = fault.delay_ms / 1000
+            if deadline_monotonic is not None:
+                delay = min(delay, max(0, deadline_monotonic - time.monotonic()))
+            if delay:
+                time.sleep(delay)
+            if _deadline_passed(deadline_monotonic):
+                raise RunDeadlineExceeded("during_response_delay")
+
         with self.session_factory.begin() as db:
             run = db.get(Run, run_id)
-            if fault:
+            _require_active(run)
+            if _deadline_passed(deadline_monotonic):
+                raise RunDeadlineExceeded("before_response_delivery")
+            if fault and not fault_recorded:
                 append_event(db, run, "fault_applied", "fault_injector", {"tool": name, "fault": fault.effect, "attempt": attempt}, call_id)
                 if fault.effect == "response_lost_after_commit":
                     return {"error": "response_lost_after_commit", "message": "response was lost; action outcome unknown"}
