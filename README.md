@@ -1,5 +1,7 @@
 # Faultline
 
+[![CI](https://github.com/SanjaySagarReddy/FaultLine/actions/workflows/ci.yml/badge.svg)](https://github.com/SanjaySagarReddy/FaultLine/actions/workflows/ci.yml)
+
 Faultline is a local agent reliability workbench. It tests whether a tool-using agent leaves a simulated payment environment in the right state after faults and untrusted customer notes. A final message is shown, but the score comes from persisted business state and trace events.
 
 ## Run locally

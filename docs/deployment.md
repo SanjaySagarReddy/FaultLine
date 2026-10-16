@@ -31,4 +31,4 @@ Do not add a payment method if the requirement is to avoid any possible overage 
 
 Migrations run at startup. A queued run can resume after restart only when its database remains available; on this free deployment the database is normally lost on restart, so visitors should not expect recovery or durable history. With a persistent database, interrupted active runs are marked inconclusive and never blindly replayed after a possible side effect.
 
-The local Docker image built successfully. A container smoke check served the UI and asset with HTTP 200, returned healthy API responses, passed `normal` and `response_loss` baseline runs with traces, and rejected an OpenAI run. Hosted CI and the public deployment still need verification.
+The local Docker image built successfully. A container smoke check served the UI and asset with HTTP 200, returned healthy API responses, passed `normal` and `response_loss` baseline runs with traces, and rejected an OpenAI run. [Hosted CI passed on commit `8ed0f1f`](https://github.com/SanjaySagarReddy/FaultLine/actions/runs/38842647888), including its Docker image build. The public deployment still needs verification.
