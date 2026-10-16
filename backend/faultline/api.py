@@ -8,6 +8,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from alembic import command
@@ -67,6 +69,7 @@ def _run_json(run: Run, evaluation: Evaluation | None = None) -> dict:
 
 
 def create_app(database_url: str | None = None, start_worker: bool = True) -> FastAPI:
+    public_demo = os.getenv("FAULTLINE_PUBLIC_DEMO") == "1"
     use_migrations = database_url is None
     if database_url is None:
         db_path = Path(os.getenv("FAULTLINE_DB", "faultline.db")).resolve()
@@ -102,6 +105,10 @@ def create_app(database_url: str | None = None, start_worker: bool = True) -> Fa
     def health():
         return {"status": "ok"}
 
+    @app.get("/api/config")
+    def config():
+        return {"public_demo": public_demo, "temporary_history": public_demo}
+
     @app.get("/api/scenarios")
     def list_scenarios():
         return [{**scenario.public(), "content_hash": canonical_hash(scenario.model_dump(mode="json"))}
@@ -117,7 +124,8 @@ def create_app(database_url: str | None = None, start_worker: bool = True) -> Fa
 
     @app.get("/api/agents")
     def get_agents():
-        return configured_agents()
+        agents = configured_agents()
+        return [agent for agent in agents if agent["id"] == "baseline"] if public_demo else agents
 
     @app.post("/api/runs", status_code=202)
     def create_run(payload: CreateRunInput):
@@ -126,6 +134,8 @@ def create_app(database_url: str | None = None, start_worker: bool = True) -> Fa
             raise HTTPException(422, "unknown scenario")
         if payload.agent_id not in {"baseline", "openai"}:
             raise HTTPException(422, "unknown agent")
+        if public_demo and payload.agent_id != "baseline":
+            raise HTTPException(422, "Public demo supports only the deterministic baseline agent")
         if payload.agent_id == "openai" and not os.getenv("OPENAI_API_KEY"):
             raise HTTPException(422, "OpenAI agent is not configured")
         selected_faults = scenario.faults if payload.fault_plan is None else payload.fault_plan
@@ -212,6 +222,17 @@ def create_app(database_url: str | None = None, start_worker: bool = True) -> Fa
             runs = db.scalars(select(Run)).all()
             evaluations = db.scalars(select(Evaluation)).all()
             return build_suite(scenarios, runs, evaluations)
+
+    static_dir = os.getenv("FAULTLINE_STATIC_DIR")
+    if static_dir:
+        frontend = Path(static_dir).resolve()
+        if not (frontend / "index.html").is_file() or not (frontend / "assets").is_dir():
+            raise RuntimeError(f"FAULTLINE_STATIC_DIR is not a built frontend: {frontend}")
+        app.mount("/assets", StaticFiles(directory=frontend / "assets"), name="assets")
+
+        @app.get("/", include_in_schema=False)
+        def frontend_index():
+            return FileResponse(frontend / "index.html")
 
     return app
 

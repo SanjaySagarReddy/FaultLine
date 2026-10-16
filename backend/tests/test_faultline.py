@@ -112,6 +112,30 @@ def test_default_startup_applies_migration(tmp_path, monkeypatch):
         assert db.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "b8e9a2c4d6f0"
 
 
+def test_built_frontend_and_api_share_one_origin(tmp_path, monkeypatch):
+    frontend = tmp_path / "dist"
+    (frontend / "assets").mkdir(parents=True)
+    (frontend / "index.html").write_text('<script src="/assets/app.js"></script>', encoding="utf-8")
+    (frontend / "assets" / "app.js").write_text("window.faultline = true", encoding="utf-8")
+    monkeypatch.setenv("FAULTLINE_STATIC_DIR", str(frontend))
+    client = TestClient(make_app(tmp_path))
+    assert client.get("/").text == '<script src="/assets/app.js"></script>'
+    assert client.get("/assets/app.js").text == "window.faultline = true"
+    assert client.get("/api/health").json() == {"status": "ok"}
+
+
+def test_public_demo_enforces_baseline_only_even_with_provider_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAULTLINE_PUBLIC_DEMO", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-only-key")
+    client = TestClient(make_app(tmp_path))
+    assert client.get("/api/config").json() == {"public_demo": True, "temporary_history": True}
+    assert [agent["id"] for agent in client.get("/api/agents").json()] == ["baseline"]
+    response = client.post("/api/runs", json={"scenario_id": "normal", "agent_id": "openai"})
+    assert response.status_code == 422
+    assert "baseline" in response.json()["detail"]
+    assert start(client)
+
+
 def test_pre_phase_b_run_migrates_as_legacy_and_stays_out_of_current_cohorts(tmp_path, monkeypatch):
     db_path = tmp_path / "pre_phase_b.db"
     db_url = f"sqlite:///{db_path.as_posix()}"

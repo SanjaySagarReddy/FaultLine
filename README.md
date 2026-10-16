@@ -44,3 +44,4 @@ On macOS/Linux, use `../.venv/bin/python` instead. The browser test starts both 
 - [Architecture](docs/architecture.md) and [decision log](docs/decisions.md): contracts, scoring choices, and limits.
 - [Demo script](docs/demo-script.md): deterministic normal, response-loss, unsafe-attempt, and comparison runs.
 - [Manual live OpenAI smoke procedure](docs/live-smoke.md): an authorization-dependent gate that is not part of automated tests.
+- [Free deployment guide](docs/deployment.md): Render Blueprint, temporary history, and public-demo checks.

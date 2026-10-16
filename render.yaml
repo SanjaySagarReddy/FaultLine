@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: faultline-demo
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: FAULTLINE_DB
+        value: /tmp/faultline.db
+      - key: FAULTLINE_PUBLIC_DEMO
+        value: "1"

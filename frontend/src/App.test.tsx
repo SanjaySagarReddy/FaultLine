@@ -75,6 +75,7 @@ describe('run fault selection', () => {
     const start = vi.spyOn(api, 'start').mockResolvedValue({ id: 'override', status: 'queued' })
     vi.spyOn(api, 'scenarios').mockResolvedValue([scenario])
     vi.spyOn(api, 'agents').mockResolvedValue([agent])
+    vi.spyOn(api, 'config').mockResolvedValue({ public_demo: true, temporary_history: true })
     vi.spyOn(api, 'runs').mockResolvedValue([])
     vi.spyOn(api, 'suite').mockResolvedValue({ ...suite, cohorts: [baselineCohort] })
     vi.spyOn(api, 'run').mockResolvedValue({ ...run, id: 'override', fault_plan: [defaultFault], fault_plan_source: 'run_override' })
@@ -84,6 +85,7 @@ describe('run fault selection', () => {
       const header = await screen.findByLabelText('Selected configuration suite score')
       await waitFor(() => expect(within(header).getByText('100%')).toBeInTheDocument())
       expect(screen.getByLabelText('Configuration suite results')).toHaveTextContent('100%')
+      expect(screen.getByText(/Run history resets when this service sleeps or restarts/)).toBeInTheDocument()
       expect(screen.getByText(/Scenario default: transient error/)).toBeInTheDocument()
 
       fireEvent.change(screen.getByLabelText('FAULT PLAN'), { target: { value: 'none' } })

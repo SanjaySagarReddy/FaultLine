@@ -47,6 +47,7 @@ function Comparison({ runs }: { runs: Run[] }) {
 export default function App() {
   const [scenarios, setScenarios] = useState<Scenario[]>([])
   const [agents, setAgents] = useState<Agent[]>([])
+  const [appConfig, setAppConfig] = useState<{ public_demo: boolean; temporary_history: boolean } | null>(null)
   const [runs, setRuns] = useState<Run[]>([])
   const [suite, setSuite] = useState<Suite | null>(null)
   const [selectedScenario, setSelectedScenario] = useState('normal')
@@ -62,7 +63,7 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
-  useEffect(() => { Promise.all([api.scenarios(), api.agents()]).then(([s, a]) => { const order = ['normal', 'transient', 'response_loss', 'malformed', 'injection']; const ordered = [...s].sort((x, y) => order.indexOf(x.id) - order.indexOf(y.id)); setScenarios(ordered); setAgents(a); if (ordered[0]) setSelectedScenario(ordered[0].id) }).catch(e => setError(e.message)) }, [])
+  useEffect(() => { Promise.all([api.scenarios(), api.agents(), api.config()]).then(([s, a, config]) => { const order = ['normal', 'transient', 'response_loss', 'malformed', 'injection']; const ordered = [...s].sort((x, y) => order.indexOf(x.id) - order.indexOf(y.id)); setScenarios(ordered); setAgents(a); setAppConfig(config); if (ordered[0]) setSelectedScenario(ordered[0].id) }).catch(e => setError(e.message)) }, [])
   useEffect(() => { const refresh = () => Promise.all([api.runs(), api.suite()]).then(([r, s]) => { setRuns(r); setSuite(s) }).catch(e => setError(e.message)); refresh(); const timer = setInterval(refresh, 2000); return () => clearInterval(timer) }, [])
   useEffect(() => { if (!selectedRunId) return; const refresh = () => Promise.all([api.run(selectedRunId), api.events(selectedRunId)]).then(([r, e]) => { setSelectedRun(r); setEvents(e.events) }).catch(e => setError(e.message)); refresh(); const timer = setInterval(refresh, 1500); return () => clearInterval(timer) }, [selectedRunId])
   const currentScenario = useMemo(() => scenarios.find(s => s.id === selectedScenario), [scenarios, selectedScenario])
@@ -81,8 +82,9 @@ export default function App() {
   function toggleCompare(id: string) { setCompareIds(old => old.includes(id) ? old.filter(x => x !== id) : [...old, id].slice(-8)); setComparison(null) }
   async function compare() { setError(''); try { const result = await api.compare(compareIds); setComparison(result.runs) } catch (e) { setError((e as Error).message) } }
 
-  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">F<span>/</span></div><div><strong>FAULTLINE</strong><small>AGENT RELIABILITY LAB</small></div></div><div className="nav-label">WORKSPACE</div><div className="nav-item active"><span>◫</span> Workbench</div><div className="nav-item"><span>≋</span> Run history</div><div className="sidebar-bottom"><div className="live-dot" /> LOCAL SIMULATOR <span className="version">v1.0</span></div></aside>
+  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">F<span>/</span></div><div><strong>FAULTLINE</strong><small>AGENT RELIABILITY LAB</small></div></div><div className="nav-label">WORKSPACE</div><div className="nav-item active"><span>◫</span> Workbench</div><div className="nav-item"><span>≋</span> Run history</div><div className="sidebar-bottom"><div className="live-dot" /> {appConfig?.public_demo ? 'PUBLIC DEMO' : 'LOCAL SIMULATOR'} <span className="version">v1.0</span></div></aside>
     <main><header className="topbar"><div><span className="breadcrumb">WORKSPACE <span>/</span> WORKBENCH</span><h1>Agent reliability, <em>measured.</em></h1><p>Test the action, inspect the trace, trust the state.</p></div><AgentMetric agent={selectedAgentDefinition} selectedModel={model} limits={limits} result={selectedCohort} scenarioCount={suite?.scenario_set.length ?? scenarios.length} faultPlanIsOverride={faultPlan !== undefined} /></header>
+      {appConfig?.public_demo && <div className="demo-banner" role="status">Free public demo · simulated payments · baseline agent only. {appConfig.temporary_history && 'Run history resets when this service sleeps or restarts.'}</div>}
       {error && <div className="error-banner" role="alert">{error}<button onClick={() => setError('')}>×</button></div>}
       <div className="content-grid"><section className="panel configure"><div className="panel-heading"><div><p className="eyebrow">01 / CONFIGURE</p><h2>New benchmark run</h2></div><span className="step-icon">↗</span></div>
         <label htmlFor="scenario">SCENARIO</label><select id="scenario" value={selectedScenario} onChange={e => { setSelectedScenario(e.target.value); setFaultPlan(undefined) }}>{scenarios.map(s => <option value={s.id} key={s.id}>{s.name}</option>)}</select>

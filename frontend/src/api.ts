@@ -3,6 +3,7 @@ export type Evaluation = { evaluator_version: string; checks: Check[]; metrics: 
 export type Fault = { tool: string; effect: 'transient_error' | 'timeout' | 'malformed_output' | 'delayed_response' | 'response_lost_after_commit'; stage: 'before_dispatch' | 'after_result' | 'before_delivery' | 'after_commit'; attempt: number; delay_ms: number }
 export type Scenario = { id: string; name: string; severity: string; task: string; version: string; content_hash: string; tool_allowlist: string[]; faults: Fault[] }
 export type Agent = { id: string; name: string; configured: boolean; model: string | null; implementation_version: string; prompt_version: string; provider_max_retries: number }
+export type AppConfig = { public_demo: boolean; temporary_history: boolean }
 export type Run = { id: string; scenario_id: string; scenario_hash: string; tool_manifest_hash: string; agent_id: string; agent_config: Record<string, unknown>; fault_plan: Fault[]; fault_plan_source: string; limits: Record<string, number>; status: string; termination_reason: string | null; final_answer: string | null; created_at: string; evaluation: Evaluation | null }
 export type TraceEvent = { seq: number; timestamp_utc: string; type: string; source: string; call_id: string | null; payload: Record<string, unknown> }
 export type ScenarioRate = { scenario_id: string; passing: number; conclusive: number; inconclusive: number; sample_count: number; pass_rate: number | null }
@@ -19,6 +20,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  config: () => request<AppConfig>('/config'),
   scenarios: () => request<Scenario[]>('/scenarios'),
   agents: () => request<Agent[]>('/agents'),
   runs: () => request<Run[]>('/runs'),

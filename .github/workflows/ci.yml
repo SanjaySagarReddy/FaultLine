@@ -35,3 +35,5 @@ jobs:
           CI: 'true'
           FAULTLINE_PYTHON: python
         run: npm run test:e2e
+      - name: Build deployment image
+        run: docker build --tag faultline:ci .

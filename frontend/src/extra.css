@@ -4,3 +4,4 @@
 .suite-config{margin-top:10px;color:#92af99;font:10px/1.7 'DM Mono',monospace}.top-metric{min-width:220px}.top-metric strong{font-size:clamp(24px,2.6vw,42px)}.top-metric small{display:block;line-height:1.4;max-width:300px}
 .top-metric.is-noncanonical strong{display:block;font-size:clamp(18px,1.8vw,26px);line-height:1.2;max-width:300px}
 .fault-controls{margin-top:18px}.fault-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;margin-top:8px}.fault-grid label{font-size:9px;letter-spacing:.4px;margin:10px 0 6px}.fault-grid input,.fault-grid select{padding:9px}
+.demo-banner{background:#1d3024;border:1px solid #4d7658;color:#c8ecd0;border-radius:5px;padding:12px 15px;margin-bottom:18px;font-size:13px;line-height:1.5}
