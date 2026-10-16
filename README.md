@@ -38,4 +38,9 @@ On macOS/Linux, use `../.venv/bin/python` instead. The browser test starts both 
 - State-based checks, safety and recovery checks, ordered traces, per-configuration suite scores across the current canonical scenario set, and comparisons that require equal benchmark conditions.
 - A FastAPI API and React workbench.
 
-See [architecture](docs/architecture.md) for contracts, failure semantics, and limits.
+## Release evidence
+
+- [Task register](docs/task-register.md): T01–T13 status and code or test evidence.
+- [Architecture](docs/architecture.md) and [decision log](docs/decisions.md): contracts, scoring choices, and limits.
+- [Demo script](docs/demo-script.md): deterministic normal, response-loss, unsafe-attempt, and comparison runs.
+- [Manual live OpenAI smoke procedure](docs/live-smoke.md): an authorization-dependent gate that is not part of automated tests.

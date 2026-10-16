@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SCENARIO_DIR = Path(__file__).resolve().parent.parent / "scenarios"
 TOOL_NAMES = ("lookup_customer", "list_payments", "read_refund_policy", "propose_refund", "execute_refund", "get_action_status")
@@ -77,6 +77,13 @@ class ScenarioDefinition(StrictModel):
     faults: list[FaultRule] = Field(default_factory=list)
     assertions: Assertions
 
+    @field_validator("id", "version")
+    @classmethod
+    def nonblank_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be empty or whitespace-only")
+        return value
+
     @model_validator(mode="after")
     def valid_references(self):
         ids = {customer.id for customer in self.customers}
@@ -108,11 +115,16 @@ def canonical_hash(value: object) -> str:
 
 def load_scenarios(directory: Path = SCENARIO_DIR) -> dict[str, ScenarioDefinition]:
     scenarios = {}
+    sources = {}
     for path in sorted(directory.glob("*.json")):
-        scenario = ScenarioDefinition.model_validate_json(path.read_text(encoding="utf-8"))
+        try:
+            scenario = ScenarioDefinition.model_validate_json(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as exc:
+            raise ValueError(f"{path}: {exc}") from exc
         if scenario.id in scenarios:
-            raise ValueError(f"duplicate scenario {scenario.id}")
+            raise ValueError(f"{path}: duplicate scenario ID {scenario.id!r} (already defined in {sources[scenario.id]})")
         scenarios[scenario.id] = scenario
+        sources[scenario.id] = path
     if not scenarios:
         raise ValueError("no scenarios found")
     return scenarios

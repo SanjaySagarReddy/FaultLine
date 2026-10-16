@@ -18,7 +18,7 @@ from faultline.agents import AGENT_IMPLEMENTATION_VERSIONS, BASELINE_PROMPT_VERS
 from faultline.api import LimitsInput, create_app
 from faultline.contracts import ScenarioDefinition, canonical_hash, load_scenarios, tool_contract_hash
 from faultline.errors import ProviderFailure
-from faultline.evaluation import EVALUATOR_VERSION
+from faultline.evaluation import EVALUATOR_VERSION, evaluate
 import faultline.gateway as gateway_module
 from faultline.gateway import ToolGateway
 from faultline.models import Evaluation, RefundAction, Run, RunEvent, SimPayment
@@ -44,7 +44,7 @@ def finish(app, run_id, agent=None):
 def test_scenario_contract_and_private_view():
     scenarios = load_scenarios()
     assert len(scenarios) == 5
-    assert "assertions" not in scenarios["normal"].public()
+    assert {"customers", "payments", "assertions", "schema_version"}.isdisjoint(scenarios["normal"].public())
     bad = scenarios["normal"].model_dump(mode="json")
     bad["payments"][0]["amount_minor"] = "invalid"
     try:
@@ -53,6 +53,56 @@ def test_scenario_contract_and_private_view():
         pass
     else:
         raise AssertionError("invalid fixture accepted")
+
+
+@pytest.mark.parametrize("field", ["id", "version"])
+@pytest.mark.parametrize("value", ["", "  \t  "])
+def test_scenario_rejects_blank_identity(tmp_path, field, value):
+    scenario = load_scenarios()["normal"].model_dump(mode="json")
+    scenario[field] = value
+    path = tmp_path / "invalid.json"
+    path.write_text(json.dumps(scenario), encoding="utf-8")
+    with pytest.raises(ValueError) as error:
+        load_scenarios(tmp_path)
+    assert path.name in str(error.value)
+    assert field in str(error.value)
+    assert "whitespace-only" in str(error.value)
+
+
+@pytest.mark.parametrize("field", ["unknown_field", "assertions"])
+def test_scenario_load_reports_unknown_fields(tmp_path, field):
+    scenario = load_scenarios()["normal"].model_dump(mode="json")
+    if field == "assertions":
+        scenario[field]["unknown_assertion"] = True
+        expected = "assertions.unknown_assertion"
+    else:
+        scenario[field] = True
+        expected = field
+    path = tmp_path / "invalid.json"
+    path.write_text(json.dumps(scenario), encoding="utf-8")
+    with pytest.raises(ValueError) as error:
+        load_scenarios(tmp_path)
+    assert path.name in str(error.value)
+    assert expected in str(error.value)
+    assert "Extra inputs are not permitted" in str(error.value)
+
+
+def test_scenario_load_reports_duplicate_id_and_both_sources(tmp_path):
+    scenario = load_scenarios()["normal"].model_dump(mode="json")
+    for filename in ("first.json", "second.json"):
+        (tmp_path / filename).write_text(json.dumps(scenario), encoding="utf-8")
+    with pytest.raises(ValueError) as error:
+        load_scenarios(tmp_path)
+    assert "duplicate scenario ID 'normal'" in str(error.value)
+    assert "first.json" in str(error.value)
+    assert "second.json" in str(error.value)
+
+
+def test_canonical_hash_ignores_mapping_order_and_json_whitespace():
+    scenario = load_scenarios()["normal"].model_dump(mode="json")
+    reordered = dict(reversed(list(scenario.items())))
+    assert canonical_hash(scenario) == canonical_hash(reordered)
+    assert canonical_hash(scenario) == canonical_hash(json.loads(json.dumps(scenario, indent=2)))
 
 
 def test_default_startup_applies_migration(tmp_path, monkeypatch):
@@ -163,6 +213,130 @@ def test_response_loss_commits_once_and_idempotent_retry(tmp_path):
         assert not any(e.type == "tool_response_delivered" and e.call_id == committed_call for e in events)
         assert any(e.type == "tool_response_delivered" and e.payload.get("result", {}).get("replayed") is True
                    for e in events)
+
+
+def test_response_loss_status_attempt_without_confirmation_fails_behavior(tmp_path):
+    app = make_app(tmp_path)
+    run_id = start(TestClient(app), "response_loss")
+    with app.state.session_factory.begin() as db:
+        run = db.get(Run, run_id)
+        run.fault_plan = [*run.fault_plan, {"tool": "get_action_status", "attempt": 1,
+                                            "stage": "before_dispatch", "effect": "timeout", "delay_ms": 0}]
+    status, evaluation = finish(app, run_id)
+    assert status == "finished" and evaluation.outcome == "fail"
+    assert evaluation.metrics["business_correct"] is True
+    assert evaluation.metrics["behavior_checks_pass"] is False
+    assert {check["name"]: check["passed"] for check in evaluation.checks}["status_checked_after_response_loss"] is False
+    with app.state.session_factory() as db:
+        events = db.scalars(select(RunEvent).where(RunEvent.run_id == run_id)).all()
+    status_calls = [event for event in events if event.type == "agent_action" and event.payload.get("tool") == "get_action_status"]
+    assert len(status_calls) == 1
+    assert not any(event.type == "tool_response_delivered" and event.call_id == status_calls[0].call_id for event in events)
+
+
+def test_malformed_retry_without_valid_payment_list_fails_behavior(tmp_path):
+    app = make_app(tmp_path)
+    run_id = start(TestClient(app), "malformed")
+    with app.state.session_factory.begin() as db:
+        run = db.get(Run, run_id)
+        run.fault_plan = [*run.fault_plan, {"tool": "list_payments", "attempt": 2,
+                                            "stage": "after_result", "effect": "malformed_output", "delay_ms": 0}]
+
+    class RefundWithoutValidList:
+        token_usage = {}
+
+        def next_action(self, context):
+            history = context.history
+            if not history:
+                return ToolCall("lookup_customer", {"email": context.customer_email})
+            last_call, last_result = history[-1]
+            if last_call.name == "lookup_customer":
+                return ToolCall("list_payments", {"customer_id": last_result["customer_id"]})
+            if last_call.name == "list_payments":
+                if sum(call.name == "list_payments" for call, _ in history) == 1:
+                    return ToolCall("list_payments", last_call.arguments)
+                return ToolCall("read_refund_policy", {"order_id": context.order_id})
+            if last_call.name == "read_refund_policy":
+                return ToolCall("propose_refund", {"payment_id": "pay-duplicate", "reason": "Later duplicate charge"})
+            if last_call.name == "propose_refund":
+                return ToolCall("execute_refund", {"proposal_id": last_result["proposal_id"],
+                                                   "idempotency_key": "known-duplicate-key"})
+            return FinalAnswer("Refund complete")
+
+    status, evaluation = finish(app, run_id, RefundWithoutValidList())
+    assert status == "finished" and evaluation.outcome == "fail"
+    assert evaluation.metrics["business_correct"] is True
+    assert evaluation.metrics["behavior_checks_pass"] is False
+    assert {check["name"]: check["passed"] for check in evaluation.checks}["malformed_output_recovered"] is False
+    with app.state.session_factory() as db:
+        events = db.scalars(select(RunEvent).where(RunEvent.run_id == run_id)).all()
+    retries = [event for event in events if event.type == "agent_action" and event.payload.get("tool") == "list_payments"]
+    assert len(retries) == 2
+    assert all(event.payload.get("result", {}).get("malformed") for event in events
+               if event.type == "tool_response_delivered" and event.call_id in {call.call_id for call in retries})
+
+
+def test_malformed_wrong_customer_empty_list_does_not_count_as_recovery(tmp_path):
+    app = make_app(tmp_path)
+    run_id = start(TestClient(app), "malformed")
+
+    class RefundAfterWrongCustomerList:
+        token_usage = {}
+
+        def next_action(self, context):
+            history = context.history
+            if not history:
+                return ToolCall("lookup_customer", {"email": context.customer_email})
+            last_call, last_result = history[-1]
+            if last_call.name == "lookup_customer":
+                return ToolCall("list_payments", {"customer_id": last_result["customer_id"]})
+            if last_call.name == "list_payments":
+                if sum(call.name == "list_payments" for call, _ in history) == 1:
+                    return ToolCall("list_payments", {"customer_id": "wrong-customer"})
+                return ToolCall("read_refund_policy", {"order_id": context.order_id})
+            if last_call.name == "read_refund_policy":
+                return ToolCall("propose_refund", {"payment_id": "pay-duplicate", "reason": "Later duplicate charge"})
+            if last_call.name == "propose_refund":
+                return ToolCall("execute_refund", {"proposal_id": last_result["proposal_id"],
+                                                   "idempotency_key": "known-duplicate-key"})
+            return FinalAnswer("Refund complete")
+
+    status, evaluation = finish(app, run_id, RefundAfterWrongCustomerList())
+    assert status == "finished" and evaluation.outcome == "fail"
+    assert evaluation.metrics["business_correct"] is True
+    assert evaluation.metrics["behavior_checks_pass"] is False
+    assert {check["name"]: check["passed"] for check in evaluation.checks}["malformed_output_recovered"] is False
+    with app.state.session_factory() as db:
+        events = db.scalars(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.seq)).all()
+    retry = next(event for event in events if event.type == "agent_action"
+                 and event.payload.get("tool") == "list_payments" and event.payload.get("attempt") == 2)
+    assert retry.payload["arguments"]["customer_id"] == "wrong-customer"
+    assert any(event.type == "tool_response_delivered" and event.call_id == retry.call_id
+               and event.payload.get("result") == {"payments": []} for event in events)
+
+
+@pytest.mark.parametrize("scenario,tool,check", [
+    ("response_loss", "get_action_status", "status_checked_after_response_loss"),
+    ("malformed", "list_payments", "malformed_output_recovered"),
+])
+def test_recovery_response_must_match_call_id(tmp_path, scenario, tool, check):
+    app = make_app(tmp_path)
+    run_id = start(TestClient(app), scenario)
+    assert finish(app, run_id)[1].outcome == "pass"
+    with app.state.session_factory.begin() as db:
+        events = db.scalars(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.seq)).all()
+        fault_seq = next(event.seq for event in events if event.type == "fault_applied")
+        recovery = next(event for event in events if event.type == "tool_response_delivered"
+                        and event.payload.get("tool") == tool and event.seq > fault_seq
+                        and "result" in event.payload and "malformed" not in event.payload["result"])
+        recovery.call_id = "unmatched-response"
+        db.delete(db.get(Evaluation, run_id))
+        db.flush()
+        evaluation = evaluate(db, db.get(Run, run_id), "agent_final")
+        db.flush()
+        assert evaluation.outcome == "fail"
+        assert evaluation.metrics["business_correct"] is True
+        assert {row["name"]: row["passed"] for row in evaluation.checks}[check] is False
 
 
 class UnsafeAgent:
@@ -480,9 +654,13 @@ def test_same_model_with_different_limits_has_separate_suite_scores(tmp_path):
 def test_noncanonical_and_old_versions_stay_out_of_current_suite(tmp_path):
     app = make_app(tmp_path)
     client = TestClient(app)
+    assert EVALUATOR_VERSION == "1.3.0"
+    current_normal_id = None
     for scenario in client.get("/api/scenarios").json():
         run_id = start(client, scenario["id"])
         assert finish(app, run_id)[1].outcome == "pass"
+        if scenario["id"] == "normal":
+            current_normal_id = run_id
 
     class NoActionAgent:
         token_usage = {}
@@ -490,6 +668,7 @@ def test_noncanonical_and_old_versions_stay_out_of_current_suite(tmp_path):
         def next_action(self, context):
             return FinalAnswer("Done")
 
+    old_evaluator_id = None
     for kind in ("fault", "scenario", "tool", "evaluator"):
         run_id = start(client)
         if kind != "evaluator":
@@ -504,14 +683,18 @@ def test_noncanonical_and_old_versions_stay_out_of_current_suite(tmp_path):
                     run.tool_manifest_hash = "legacy-tool-hash"
         assert finish(app, run_id, NoActionAgent())[1].outcome == "fail"
         if kind == "evaluator":
+            old_evaluator_id = run_id
             with app.state.session_factory.begin() as db:
-                db.get(Evaluation, run_id).evaluator_version = "0.9.0"
+                db.get(Evaluation, run_id).evaluator_version = "1.2.0"
 
     suite = client.get("/api/suite").json()
     cohort = next(row for row in suite["cohorts"] if row["agent_id"] == "baseline")
     assert cohort["suite_score"] == 100.0 and cohort["conclusive"] == 5
     assert suite["history"]["conclusive"] == 9
     assert suite["history"]["passing"] == 5
+    comparison = client.get("/api/comparisons", params={"run_ids": f"{current_normal_id},{old_evaluator_id}"})
+    assert comparison.status_code == 422
+    assert comparison.json()["detail"] == "incompatible runs"
 
 
 def test_crash_after_refund_keeps_true_business_checks_and_names_failure(tmp_path):

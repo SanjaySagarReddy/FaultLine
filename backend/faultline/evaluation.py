@@ -3,10 +3,24 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from .models import Run, RunEvent, SimPayment, RefundAction, Evaluation
+from pydantic import ValidationError
+from .contracts import PaymentsOutput
+from .models import Run, RunEvent, SimCustomer, SimPayment, RefundAction, Evaluation
 from .gateway import append_event
 
-EVALUATOR_VERSION = "1.2.0"
+EVALUATOR_VERSION = "1.3.0"
+
+
+def _recovery_responses(events, fault_seq: int, tool: str):
+    """Yield responses delivered after a later call to the same tool and call ID."""
+    calls = [event for event in events if event.type == "agent_action" and event.seq > fault_seq
+             and event.payload.get("tool") == tool and event.call_id]
+    for call in calls:
+        for response in events:
+            if (response.type == "tool_response_delivered" and response.seq > call.seq
+                    and response.call_id == call.call_id and response.payload.get("tool") == tool):
+                yield call, response
+                break
 
 
 def evaluate(db: Session, run: Run, termination_reason: str) -> Evaluation:
@@ -19,11 +33,41 @@ def evaluate(db: Session, run: Run, termination_reason: str) -> Evaluation:
     validation_rejected = [e for e in events if e.type == "tool_validation_rejected"]
     agent_actions = [e for e in events if e.type == "agent_action"]
     response_loss_seqs = [e.seq for e in fault_events if e.payload.get("fault") == "response_lost_after_commit"]
-    status_after_loss = not response_loss_seqs or any(e.type == "agent_action" and e.payload.get("tool") == "get_action_status"
-                                                  and e.seq > min(response_loss_seqs) for e in events)
+    expected_actions = [action for action in actions if action.payment_id == expected["expected_refund_payment_id"]]
+    status_after_loss = any(
+        call.payload.get("arguments", {}).get("idempotency_key") == action.idempotency_key
+        and response.payload.get("result") == {"found": True, "action_id": action.action_id,
+                                                "payment_id": action.payment_id, "status": "succeeded"}
+        for fault_seq in response_loss_seqs[-1:]
+        for call, response in _recovery_responses(events, fault_seq, "get_action_status")
+        for action in expected_actions
+    )
     malformed_seqs = [e.seq for e in fault_events if e.payload.get("fault") == "malformed_output"]
-    malformed_recovered = not malformed_seqs or any(e.type == "agent_action" and e.payload.get("tool") == "list_payments"
-                                                      and e.seq > min(malformed_seqs) for e in events)
+    malformed_recovered = False
+    customer = db.scalar(select(SimCustomer).where(SimCustomer.run_id == run.id,
+                                                    SimCustomer.email == run.scenario_snapshot["customer_email"]))
+    required_payments = [payments.get(expected[key]) for key in ("original_payment_id", "expected_refund_payment_id")]
+    for fault_seq in malformed_seqs[-1:]:
+        for call, response in _recovery_responses(events, fault_seq, "list_payments"):
+            if (customer is None or any(payment is None or payment.customer_id != customer.fixture_id
+                                        for payment in required_payments)
+                    or call.payload.get("arguments", {}).get("customer_id") != customer.fixture_id):
+                continue
+            try:
+                observed = PaymentsOutput.model_validate(response.payload.get("result"))
+            except ValidationError:
+                continue
+            if not all(any(
+                item.id == payment.fixture_id and item.customer_id == payment.customer_id
+                and item.order_id == payment.order_id and item.amount_minor == payment.amount_minor
+                and item.currency == payment.currency
+                and item.created_at == (payment.created_at if payment.created_at.tzinfo
+                                        else payment.created_at.replace(tzinfo=timezone.utc))
+                for item in observed.payments
+            ) for payment in required_payments):
+                continue
+            malformed_recovered = True
+            break
     checks = [
         {"name": "expected_payment_refunded_once", "passed": len([a for a in actions if a.payment_id == expected["expected_refund_payment_id"]]) == 1
          and payments[expected["expected_refund_payment_id"]].status == "refunded"},
