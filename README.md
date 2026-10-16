@@ -2,7 +2,9 @@
 
 [![CI](https://github.com/SanjaySagarReddy/FaultLine/actions/workflows/ci.yml/badge.svg)](https://github.com/SanjaySagarReddy/FaultLine/actions/workflows/ci.yml)
 
-Faultline is a local agent reliability workbench. It tests whether a tool-using agent leaves a simulated payment environment in the right state after faults and untrusted customer notes. A final message is shown, but the score comes from persisted business state and trace events.
+Faultline is an agent reliability workbench. It tests whether a tool-using agent leaves a simulated payment environment in the right state after faults and untrusted customer notes. A final message is shown, but the score comes from persisted business state and trace events.
+
+**[Try the live demo](https://faultline-demo.onrender.com)** — Run the deterministic baseline through five scenarios and inspect the scorecard and trace. The free service may take about a minute to wake after inactivity; its run history resets when it sleeps or restarts.
 
 ## Run locally
 

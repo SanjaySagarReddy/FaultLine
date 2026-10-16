@@ -2,7 +2,7 @@
 
 ## 2026-10-16 — Free public demo with temporary history
 
-Deploy one Docker-based Render Free web service, with the UI and API on the same origin and SQLite at `/tmp/faultline.db`. The free filesystem is ephemeral, so the UI explicitly labels run history as temporary. `FAULTLINE_PUBLIC_DEMO=1` restricts API run creation to the deterministic baseline even if a provider key is accidentally configured. This keeps the public demo within free infrastructure and prevents visitors from triggering paid provider calls. The container passed a local public-demo smoke check and [hosted CI](https://github.com/SanjaySagarReddy/FaultLine/actions/runs/38842647888); the public deployment remains to be verified. See [deployment instructions](deployment.md), [Blueprint](../render.yaml), and [API guard](../backend/faultline/api.py).
+Deploy one Docker-based Render Free web service, with the UI and API on the same origin and SQLite at `/tmp/faultline.db`. The free filesystem is ephemeral, so the UI explicitly labels run history as temporary. `FAULTLINE_PUBLIC_DEMO=1` restricts API run creation to the deterministic baseline even if a provider key is accidentally configured. This keeps the public demo within free infrastructure and prevents visitors from triggering paid provider calls. The container passed a local public-demo smoke check and [hosted CI](https://github.com/SanjaySagarReddy/FaultLine/actions/runs/38842918283); the [public demo](https://faultline-demo.onrender.com) passed live API and browser checks. See [deployment evidence](deployment.md), [Blueprint](../render.yaml), and [API guard](../backend/faultline/api.py).
 
 ## 2026-10-16 — Evaluator contract v1.3.0
 

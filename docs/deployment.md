@@ -1,5 +1,7 @@
 # Free public demo deployment
 
+**Live instance:** [faultline-demo.onrender.com](https://faultline-demo.onrender.com)
+
 Faultline uses one [Render Free web service](https://render.com/docs/free). The root [Blueprint](../render.yaml) builds the container from the repository Dockerfile and starts one FastAPI process serving the React UI, API, and run worker. No paid database, volume, frontend host, or OpenAI API key is needed.
 
 ## What the free demo provides
@@ -31,4 +33,6 @@ Do not add a payment method if the requirement is to avoid any possible overage 
 
 Migrations run at startup. A queued run can resume after restart only when its database remains available; on this free deployment the database is normally lost on restart, so visitors should not expect recovery or durable history. With a persistent database, interrupted active runs are marked inconclusive and never blindly replayed after a possible side effect.
 
-The local Docker image built successfully. A container smoke check served the UI and asset with HTTP 200, returned healthy API responses, passed `normal` and `response_loss` baseline runs with traces, and rejected an OpenAI run. [Hosted CI passed on commit `8ed0f1f`](https://github.com/SanjaySagarReddy/FaultLine/actions/runs/38842647888), including its Docker image build. The public deployment still needs verification.
+The local Docker image built successfully. A container smoke check served the UI and asset with HTTP 200, returned healthy API responses, passed `normal` and `response_loss` baseline runs with traces, and rejected an OpenAI run. [Hosted CI passed on commit `855dfff`](https://github.com/SanjaySagarReddy/FaultLine/actions/runs/38842918283), including its Docker image build.
+
+On 2026-10-16, the live service returned HTTP 200 for the UI and asset, reported five scenarios and baseline-only public mode, and passed two normal runs and one response-loss run with 29, 29, and 34 trace events. The two normal runs compared compatibly; a requested OpenAI run was rejected with HTTP 422. A hosted browser journey showed the temporary-history banner, a passing baseline scorecard, and a state-change trace. These observations verify the public demo at that time; Render's free filesystem still makes run history temporary.
