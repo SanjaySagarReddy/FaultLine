@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+import json
+from pathlib import Path
 import time
 import re
 import pytest
 from types import SimpleNamespace
+from alembic import command
+from alembic.config import Config
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from sqlalchemy import select, text
+from sqlalchemy import create_engine, select, text
 
-from faultline.agents import AgentContext, BaselineAgent, FinalAnswer, OpenAIAgent, ToolCall
-from faultline.api import create_app
-from faultline.contracts import ScenarioDefinition, load_scenarios
+from faultline.agents import AGENT_IMPLEMENTATION_VERSIONS, BASELINE_PROMPT_VERSION, AgentContext, BaselineAgent, FinalAnswer, OpenAIAgent, ToolCall
+from faultline.api import LimitsInput, create_app
+from faultline.contracts import ScenarioDefinition, canonical_hash, load_scenarios, tool_contract_hash
 from faultline.errors import ProviderFailure
+from faultline.evaluation import EVALUATOR_VERSION
 import faultline.gateway as gateway_module
 from faultline.gateway import ToolGateway
 from faultline.models import Evaluation, RefundAction, Run, RunEvent, SimPayment
@@ -54,6 +60,64 @@ def test_default_startup_applies_migration(tmp_path, monkeypatch):
     app = create_app(start_worker=False)
     with app.state.session_factory() as db:
         assert db.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "b8e9a2c4d6f0"
+
+
+def test_pre_phase_b_run_migrates_as_legacy_and_stays_out_of_current_cohorts(tmp_path, monkeypatch):
+    db_path = tmp_path / "pre_phase_b.db"
+    db_url = f"sqlite:///{db_path.as_posix()}"
+    backend_dir = Path(__file__).resolve().parents[1]
+    config = Config(str(backend_dir / "alembic.ini"))
+    config.set_main_option("script_location", str(backend_dir / "migrations"))
+    config.set_main_option("sqlalchemy.url", db_url)
+    command.upgrade(config, "337a76afb704")
+
+    scenario = load_scenarios()["normal"]
+    snapshot = scenario.model_dump(mode="json")
+    legacy_id = "pre-phase-b-run"
+    engine = create_engine(db_url)
+    with engine.begin() as connection:
+        connection.execute(text("""INSERT INTO runs
+            (id, scenario_id, scenario_version, scenario_hash, scenario_snapshot,
+             tool_manifest_hash, agent_id, agent_config, fault_plan, limits, status,
+             termination_reason, created_at, event_seq)
+            VALUES (:id, :scenario_id, :scenario_version, :scenario_hash, :scenario_snapshot,
+                    :tool_manifest_hash, :agent_id, :agent_config, :fault_plan, :limits, :status,
+                    :termination_reason, :created_at, :event_seq)"""), {
+            "id": legacy_id, "scenario_id": scenario.id, "scenario_version": scenario.version,
+            "scenario_hash": canonical_hash(snapshot), "scenario_snapshot": json.dumps(snapshot),
+            "tool_manifest_hash": tool_contract_hash(scenario.tool_allowlist),
+            "agent_id": "baseline", "agent_config": json.dumps({
+                "id": "baseline", "implementation_version": AGENT_IMPLEMENTATION_VERSIONS["baseline"],
+                "prompt_version": BASELINE_PROMPT_VERSION, "model": None,
+                "provider_timeout_seconds": 25, "provider_max_retries": 0,
+            }), "fault_plan": json.dumps([fault.model_dump(mode="json") for fault in scenario.faults]),
+            "limits": json.dumps(LimitsInput().model_dump()), "status": "finished",
+            "termination_reason": "agent_final", "created_at": datetime.now(timezone.utc).isoformat(),
+            "event_seq": 0,
+        })
+        # Match the current evaluator version to isolate fault-plan provenance as the exclusion reason.
+        connection.execute(text("""INSERT INTO evaluations
+            (run_id, evaluator_version, checks, metrics, outcome, explanation)
+            VALUES (:run_id, :evaluator_version, :checks, :metrics, :outcome, :explanation)"""), {
+            "run_id": legacy_id, "evaluator_version": EVALUATOR_VERSION, "checks": "[]",
+            "metrics": "{}", "outcome": "pass", "explanation": "Legacy fixture",
+        })
+    engine.dispose()
+
+    monkeypatch.setenv("FAULTLINE_DB", str(db_path))
+    app = create_app(start_worker=False)
+    client = TestClient(app)
+    with app.state.session_factory() as db:
+        assert db.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "b8e9a2c4d6f0"
+        assert db.get(Run, legacy_id).fault_plan_source == "legacy_unknown"
+    assert client.get(f"/api/runs/{legacy_id}").json()["fault_plan_source"] == "legacy_unknown"
+    current_id = start(client)
+    assert finish(app, current_id)[1].outcome == "pass"
+    suite = client.get("/api/suite").json()
+    assert len(suite["cohorts"]) == 1
+    normal = next(row for row in suite["cohorts"][0]["scenarios"] if row["scenario_id"] == "normal")
+    assert normal["sample_count"] == normal["conclusive"] == 1
+    assert suite["history"]["passing"] == suite["history"]["conclusive"] == 2
 
 
 def test_all_curated_scenarios_pass_with_baseline(tmp_path):

@@ -21,18 +21,20 @@ export function matchingCohort(
   )
 }
 
-export function AgentMetric({ agent, selectedModel, limits, result, scenarioCount }: {
+export function AgentMetric({ agent, selectedModel, limits, result, scenarioCount, faultPlanIsOverride }: {
   agent?: Agent
   selectedModel: string
   limits: Record<string, number>
   result?: SuiteCohort
   scenarioCount: number
+  faultPlanIsOverride: boolean
 }) {
   const model = agent?.id === 'openai' ? (selectedModel || agent.model || 'Unspecified model') : 'Deterministic'
-  return <div className="top-metric" aria-label="Selected configuration suite score">
+  return <div className={`top-metric${faultPlanIsOverride ? ' is-noncanonical' : ''}`} aria-label="Selected configuration suite score">
     <span>{agent?.id.toUpperCase() || 'AGENT'} SUITE RELIABILITY</span>
-    <strong>{result?.suite_score == null ? 'Incomplete' : result.suite_score.toFixed(0) + '%'}</strong>
-    <small>{model} | {limits.max_turns} turns, {limits.max_tool_calls} calls | {result?.completed_scenarios ?? 0}/{scenarioCount} scenarios</small>
+    <strong>{faultPlanIsOverride ? 'Not in canonical suite' : result?.suite_score == null ? 'Incomplete' : result.suite_score.toFixed(0) + '%'}</strong>
+    {faultPlanIsOverride && <small>Explicit fault plan. Canonical cohort history remains below.</small>}
+    <small>{model} | {limits.max_turns} turns, {limits.max_tool_calls} calls | {faultPlanIsOverride ? 'explicit fault plan' : `${result?.completed_scenarios ?? 0}/${scenarioCount} scenarios`}</small>
     <small>{limits.run_timeout_seconds}s run, {limits.provider_timeout_seconds}s provider | {agent?.implementation_version || 'Loading adapter'} | {agent?.prompt_version || 'Loading prompt'}</small>
   </div>
 }

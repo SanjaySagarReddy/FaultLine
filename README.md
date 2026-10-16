@@ -12,7 +12,7 @@ python scripts/dev.py
 
 The command creates `.venv`, installs backend and frontend dependencies, applies the database migration, and starts the API and web UI. Open <http://127.0.0.1:5173>. Stop with Ctrl+C. The SQLite database is `backend/faultline.db` by default.
 
-Choose Scenario default, No injected fault, or Custom single fault in the workbench. The API also accepts a validated fault_plan list on POST /api/runs; omitting it keeps the scenario default and an empty list disables faults. Any explicit plan remains in run history but does not enter the canonical five-scenario score, even if it equals the default.
+Choose Scenario default, No injected fault, or Custom single fault in the workbench. The API also accepts a validated fault_plan list on POST /api/runs; omitting it keeps the scenario default and an empty list disables faults. Any explicit plan remains in run history but does not enter the canonical five-scenario score, even if it equals the default. The selected-configuration header shows “Not in canonical suite” for an override; canonical cohort history remains visible below.
 
 The deterministic baseline works without credentials. To enable the live LLM agent, set `OPENAI_API_KEY` on the backend process and optionally `OPENAI_MODEL` (default `gpt-5.6-terra`). The key never appears in API responses or traces. A live run uses the OpenAI Responses API and may incur provider charges. Use the web agent selector for a manual smoke run; CI uses a mocked provider response.
 

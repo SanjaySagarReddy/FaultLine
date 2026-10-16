@@ -1,8 +1,9 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { Scorecard, Trace } from './App'
+import App, { Scorecard, Trace } from './App'
 import { AgentMetric, SuiteOverview, matchingCohort } from './SuiteOverview'
 import { FaultControls } from './FaultControls'
+import { api } from './api'
 import type { Agent, Run, Scenario, Suite, SuiteCohort, TraceEvent } from './api'
 
 const run = { id: 'run-123', scenario_id: 'normal', scenario_hash: 'abc', tool_manifest_hash: 'def', agent_id: 'baseline', agent_config: {}, fault_plan: [], fault_plan_source: 'scenario_default', limits: {}, status: 'finished', termination_reason: 'agent_final', final_answer: 'Done', created_at: '2026-10-16T00:00:00Z', evaluation: { evaluator_version: '1.1.0', checks: [{ name: 'expected_payment_refunded_once', passed: true }], metrics: { business_correct: true, safety_clear: true, behavior_checks_pass: true, tool_call_count: 5 }, outcome: 'pass' as const, explanation: 'All checks passed.' } } satisfies Run
@@ -36,7 +37,7 @@ describe('run presentation', () => {
     expect(matchingCohort(suite, openai, 'model-b', limits)?.suite_score).toBe(0)
     expect(matchingCohort(suite, openai, 'model-c', limits)).toBeUndefined()
     expect(matchingCohort(suite, openai, 'model-a', { ...limits, max_turns: 1 })).toBeUndefined()
-    render(<><AgentMetric agent={openai} selectedModel="model-c" limits={limits} result={matchingCohort(suite, openai, 'model-c', limits)} scenarioCount={1} /><SuiteOverview suite={suite} /></>)
+    render(<><AgentMetric agent={openai} selectedModel="model-c" limits={limits} result={matchingCohort(suite, openai, 'model-c', limits)} scenarioCount={1} faultPlanIsOverride={false} /><SuiteOverview suite={suite} /></>)
     expect(screen.getByLabelText('Selected configuration suite score')).toHaveTextContent('Incomplete')
     expect(screen.getByLabelText('Selected configuration suite score')).toHaveTextContent('model-c')
     expect(screen.getByText(/Pooled history across all agents, configurations, and scenario versions/)).toBeInTheDocument()
@@ -58,5 +59,52 @@ describe('run fault selection', () => {
     expect(onChange).toHaveBeenLastCalledWith([{ tool: 'execute_refund', attempt: 1, effect: 'response_lost_after_commit', stage: 'after_commit', delay_ms: 0 }])
     fireEvent.change(screen.getByLabelText('FAULT PLAN'), { target: { value: 'default' } })
     expect(onChange).toHaveBeenLastCalledWith(undefined)
+  })
+
+  it('hides a populated canonical header score for every explicit plan, including an identical one', async () => {
+    const defaultFault: Scenario['faults'][number] = {
+      tool: 'lookup_customer', attempt: 1, effect: 'transient_error', stage: 'before_dispatch', delay_ms: 0,
+    }
+    const scenario: Scenario = { id: 'normal', name: 'Normal', severity: 'low', task: 'Refund', version: '1', content_hash: 'hash', tool_allowlist: ['lookup_customer'], faults: [defaultFault] }
+    const agent: Agent = { id: 'baseline', name: 'Baseline', configured: true, model: null, implementation_version: 'baseline-agent-v1', prompt_version: 'baseline-agent-v1', provider_max_retries: 0 }
+    const baselineCohort: SuiteCohort = {
+      ...cohort('model-a', 100), agent_id: 'baseline',
+      agent_config: { ...cohort('model-a', 100).agent_config, id: 'baseline', model: null,
+        implementation_version: agent.implementation_version, prompt_version: agent.prompt_version },
+    }
+    const start = vi.spyOn(api, 'start').mockResolvedValue({ id: 'override', status: 'queued' })
+    vi.spyOn(api, 'scenarios').mockResolvedValue([scenario])
+    vi.spyOn(api, 'agents').mockResolvedValue([agent])
+    vi.spyOn(api, 'runs').mockResolvedValue([])
+    vi.spyOn(api, 'suite').mockResolvedValue({ ...suite, cohorts: [baselineCohort] })
+    vi.spyOn(api, 'run').mockResolvedValue({ ...run, id: 'override', fault_plan: [defaultFault], fault_plan_source: 'run_override' })
+    vi.spyOn(api, 'events').mockResolvedValue({ events: [], next_after_seq: 0 })
+    const view = render(<App />)
+    try {
+      const header = await screen.findByLabelText('Selected configuration suite score')
+      await waitFor(() => expect(within(header).getByText('100%')).toBeInTheDocument())
+      expect(screen.getByLabelText('Configuration suite results')).toHaveTextContent('100%')
+      expect(screen.getByText(/Scenario default: transient error/)).toBeInTheDocument()
+
+      fireEvent.change(screen.getByLabelText('FAULT PLAN'), { target: { value: 'none' } })
+      expect(header).toHaveTextContent('Not in canonical suite')
+      expect(header).not.toHaveTextContent('100%')
+      expect(header).not.toHaveTextContent('Incomplete')
+      expect(screen.getByText('Run override: no injected fault')).toBeInTheDocument()
+      expect(screen.getByLabelText('Configuration suite results')).toHaveTextContent('100%')
+
+      fireEvent.change(screen.getByLabelText('FAULT PLAN'), { target: { value: 'custom' } })
+      expect(header).toHaveTextContent('Not in canonical suite')
+      expect(screen.getByText(/Run override: transient error/)).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: /start run/i }))
+      await waitFor(() => expect(start).toHaveBeenCalledWith('normal', 'baseline', undefined, limits, [defaultFault]))
+
+      fireEvent.change(screen.getByLabelText('FAULT PLAN'), { target: { value: 'default' } })
+      expect(within(header).getByText('100%')).toBeInTheDocument()
+      expect(screen.getByText(/Scenario default: transient error/)).toBeInTheDocument()
+    } finally {
+      view.unmount()
+      vi.restoreAllMocks()
+    }
   })
 })
